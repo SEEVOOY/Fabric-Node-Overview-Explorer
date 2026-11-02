@@ -1,0 +1,6 @@
+# Browser sign-in and REST calls (the same two packages as pims-explorer)
+requests>=2.31
+azure-identity>=1.15
+
+# Tests only
+pytest>=7
