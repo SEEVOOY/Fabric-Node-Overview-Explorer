@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fabric Explorer</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="bar">
+  <button id="toggleLeft" class="icon-btn" aria-pressed="true" title="Show or hide the workspace structure">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M7.5 3.5v13"/></svg>
+  </button>
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="10" width="22" height="12" rx="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10.5 10v12M21.5 10v12" stroke="currentColor" stroke-width="1.4"/><path d="M1 16h4M27 16h4" stroke="var(--c-write)" stroke-width="2"/></svg>
+    <span>Fabric Explorer</span>
+  </div>
+  <div class="ws">
+    <button id="wsButton" class="ws-button" aria-haspopup="dialog" aria-expanded="false" title="Open another workspace">
+      <span id="wsName">Open a workspace</span>
+      <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 4.5 6 8l3.5-3.5"/></svg>
+    </button>
+    <div id="wsPop" class="pop ws-pop" role="dialog" aria-label="Open a workspace" hidden>
+      <label class="pop-label" for="wsLink">Paste the workspace address from your browser</label>
+      <div class="paste-row">
+        <input id="wsLink" type="text" spellcheck="false" autocomplete="off"
+               placeholder="https://app.fabric.microsoft.com/groups/…">
+        <button id="wsLinkGo" class="btn primary">Open</button>
+      </div>
+      <p id="wsLinkMsg" class="msg" role="status"></p>
+      <label class="pop-label" for="wsFilter">Or choose one you can access</label>
+      <input id="wsFilter" class="field" type="search" placeholder="Filter workspaces" autocomplete="off">
+      <ul id="wsList" class="ws-list"></ul>
+    </div>
+  </div>
+  <button id="reload" class="btn" title="Fetch the workspace's list of items again">Reload</button>
+  <div class="search">
+    <input id="search" type="search" placeholder="Find an item or table" aria-label="Find an item or table"
+           autocomplete="off" spellcheck="false">
+    <ul id="searchList" class="pop" role="listbox" hidden></ul>
+  </div>
+  <div id="activity" class="activity" aria-live="polite"></div>
+  <div id="account" class="account"></div>
+  <button id="toggleRight" class="icon-btn" aria-pressed="true" title="Show or hide the details panel">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M12.5 3.5v13"/></svg>
+  </button>
+</header>
+
+<main class="layout">
+  <aside id="tree" class="panel tree" aria-label="Workspace">
+    <div class="resizer" id="resizeLeft" title="Drag to make this panel wider; double-click to reset"></div>
+    <div class="tabs" role="tablist" aria-label="Left panel">
+      <button role="tab" id="tabStructure" data-tab="structure" aria-selected="true" aria-controls="paneStructure">Structure</button>
+      <button role="tab" id="tabDatasets" data-tab="datasets" aria-selected="false" aria-controls="paneDatasets">Datasets</button>
+      <button role="tab" id="tabColumns" data-tab="columns" aria-selected="false" aria-controls="paneColumns">Table content</button>
+    </div>
+    <div id="paneStructure" class="pane" role="tabpanel" aria-labelledby="tabStructure">
+      <div class="panel-head">
+        <div class="tree-title">
+          <strong id="treeWs">No workspace open</strong>
+          <a id="treeWsLink" class="ext" target="_blank" rel="noopener" title="Open the workspace in Fabric" hidden>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 2.5h4.5V7M13.5 2.5 7 9M11 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3"/></svg>
+          </a>
+        </div>
+        <div class="tree-sub" id="treeSub"></div>
+        <div class="head-row">
+          <div class="seg" role="group" aria-label="Group items">
+            <button data-group="type" aria-pressed="true">By type</button>
+            <button data-group="folder" aria-pressed="false">By folder</button>
+          </div>
+          <div class="head-actions">
+            <button class="btn small" data-all="1" title="Put every item on the map">Show all</button>
+            <button class="btn small" data-all="0" title="Take every item off the map, then tick the ones to focus on">Hide all</button>
+          </div>
+        </div>
+        <input id="treeFilter" class="field" type="search" placeholder="Filter items" aria-label="Filter items" autocomplete="off">
+      </div>
+      <div id="treeBody" class="tree-body"></div>
+    </div>
+    <div id="paneDatasets" class="pane" role="tabpanel" aria-labelledby="tabDatasets" hidden>
+      <div id="dsBody" class="cols-body"></div>
+    </div>
+    <div id="paneColumns" class="pane" role="tabpanel" aria-labelledby="tabColumns" hidden>
+      <div id="colsBody" class="cols-body"></div>
+    </div>
+  </aside>
+
+  <section class="stage" id="stage">
+    <canvas id="sheet" tabindex="0" aria-label="Map of the workspace. Select an item to read its content and draw its links."></canvas>
+    <div class="tools">
+      <button id="fit" class="tool" title="Fit the map to the window (F)">Fit</button>
+      <div class="seg" role="group" aria-label="Arrangement">
+        <button data-layout="free" aria-pressed="true" title="Items find their place by their links; you can drag them">Free</button>
+        <button data-layout="struct" aria-pressed="false" title="Lakehouses as columns of their schemas and tables, notebooks between the lakehouses they use">Structured</button>
+      </div>
+      <button id="relayout" class="tool" title="Arrange the map again">Re-layout</button>
+      <div class="menu">
+        <button id="viewBtn" class="tool" aria-haspopup="true" aria-expanded="false">View</button>
+        <div id="viewMenu" class="pop menu-pop" hidden>
+          <label><input type="checkbox" data-opt="tables" checked> Tables and folders</label>
+          <label><input type="checkbox" data-opt="areas" checked> Lakehouse areas</label>
+          <label><input type="checkbox" data-opt="structure" checked> Workspace groups</label>
+          <label><input type="checkbox" data-opt="settings" checked> Default lakehouse links</label>
+          <label><input type="checkbox" data-opt="flow" checked> Arrange data flow left to right</label>
+        </div>
+      </div>
+      <div class="seg" role="group" aria-label="When you select something, highlight">
+        <button data-hl="full" aria-pressed="true" title="Everything upstream and downstream">Full lineage</button>
+        <button data-hl="direct" aria-pressed="false" title="Only what is linked directly">Direct links</button>
+      </div>
+      <button id="focusBtn" class="tool" aria-pressed="false" title="Show only what is highlighted; click again to bring the rest back. Your tickboxes don't change.">Focus</button>
+      <div class="menu">
+        <button id="exportBtn" class="tool" aria-haspopup="true" aria-expanded="false">Export</button>
+        <div id="exportMenu" class="pop menu-pop" hidden>
+          <button data-export="csv">Relationships as CSV (Excel)</button>
+          <button data-export="json">The whole map as JSON</button>
+        </div>
+      </div>
+      <button id="theme" class="tool" title="Switch between the sheet and blueprint colours">Blueprint</button>
+    </div>
+
+    <div id="mapHint" class="map-hint" aria-live="polite"></div>
+    <div class="map-bars">
+      <div id="focusBar" class="focus-bar" role="status" hidden><span id="focusText"></span><button id="focusLeave">Leave focus</button></div>
+      <div id="pinBar" class="focus-bar pin-bar" role="status" hidden><span id="pinText"></span><button id="pinOff">Unpin</button></div>
+    </div>
+    <details class="legend" id="legend" open>
+      <summary>Legend</summary>
+      <div class="legend-grid" id="legendGrid"></div>
+    </details>
+
+    <div class="titleblock" id="titleblock" hidden>
+      <div class="tb-name">
+        <strong id="tbName"></strong>
+        <a id="tbLink" class="ext" target="_blank" rel="noopener" title="Open the workspace in Fabric">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 2.5h4.5V7M13.5 2.5 7 9M11 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3"/></svg>
+        </a>
+      </div>
+      <dl class="tb-grid">
+        <div><dt>Items</dt><dd id="tbItems">0</dd></div>
+        <div><dt>Read</dt><dd id="tbRead">0</dd></div>
+        <div><dt>Links found</dt><dd id="tbLinks">0</dd></div>
+      </dl>
+      <div class="tb-foot" id="tbFoot"></div>
+    </div>
+
+    <div id="tip" class="tip" role="tooltip" hidden></div>
+    <div id="ctxMenu" class="ctx-menu" role="menu" hidden></div>
+    <div id="empty" class="empty" hidden></div>
+  </section>
+
+  <aside id="details" class="panel details" aria-label="Details">
+    <div id="detailsBody" class="details-body"></div>
+  </aside>
+</main>
+
+<footer class="log">
+  <button id="logToggle" class="log-toggle" aria-expanded="false" title="The calls this app made to Fabric, Power BI and OneLake">
+    Requests to Fabric <span id="logCount">0</span>
+  </button>
+  <div id="logBody" class="log-body" hidden>
+    <table><tbody id="logRows"></tbody></table>
+  </div>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
