@@ -66,14 +66,15 @@
   const S = {
     hello: {}, ws: null, wsData: null, folders: new Map(), lakeInfo: {}, wsList: null,
     groupMode: store.get("groupMode", "type"),
-    opts: Object.assign({tables: true, areas: true, structure: true, settings: true, flow: true}, store.get("opts", {})),
+    opts: Object.assign({tables: true, areas: true, structure: true, settings: true, flow: true, snap: true}, store.get("opts", {})),
     hl: store.get("hl", "full"),
     nodes: new Map(), edges: new Map(), scans: new Map(), busy: new Map(),
     queue: [], running: 0, batch: {total: 0, done: 0}, concurrency: 4,
     shown: new Set(), hidden: new Set(), expanded: new Set(), contents: new Set(), treeOpen: new Set(), subState: new Map(),
     leftTab: "structure", colCache: new Map(), colLoading: new Set(), colTarget: null,
-    layout: store.get("layout", "free"), tween: null, multi: new Set(), offsets: new Map(), space: false, focusOpen: true, ddOpen: new Set(), ddSec: new Map(), ddSecIds: new Map(), treeDD: new Set(), quietReads: new Set(), folderMode: new Set(), folderVis: new Map(), focusIds: null, focusSig: "", bigCascade: 300, threadDir: store.get("threadDir", "both"), focusMode: null, addedBy: new Map(), pendingExpand: new Map(), pinned: null, colsOnMap: new Map(), modelColsOpen: new Map(),
-    modelColsVisibleOnly: store.get("modelColsVisibleOnly", false), colStale: new Set(), dsScope: store.get("dsScope", "map"), dsFilter: "all",
+    layout: "struct", tween: null, multi: new Set(), offsets: new Map(), space: false, focusOpen: true, ddOpen: new Set(), ddSec: new Map(), ddSecIds: new Map(), treeDD: new Set(), quietReads: new Set(), folderMode: new Set(), folderVis: new Map(), focusIds: null, focusSig: "", bigCascade: 300, threadDir: store.get("threadDir", "both"), focusMode: null, addedBy: new Map(), pendingExpand: new Map(), pinned: null, colsOnMap: new Map(), modelColsOpen: new Map(),
+    modelColsVisibleOnly: store.get("modelColsVisibleOnly", false), colStale: new Set(),
+    focusAnchor: null, focusExtra: new Set(), focusOut: new Set(), flash: null, rowOrder: new Map(), secOrder: new Map(), linkedOnly: new Set(), dsScope: store.get("dsScope", "map"), dsFilter: "all",
     sel: null, selEdge: null, active: null, hover: null, hoverEdge: null, press: null,
     view: {x: 0, y: 0, k: 1}, alpha: 0, logLast: 0, logRows: [], treeFilter: "", loadedAt: "",
   };
@@ -364,11 +365,35 @@
       }
     }
     for (const n of S.nodes.values()) if (n.kind === "schema") n.count = counts.get(n.id) || 0;
-    // focus mode: only what was highlighted when it started, and whatever has been ticked since
+    // focus mode: exactly the focused items, whatever their tickboxes say (and the folders of focused tables)
     if (S.focusMode) {
       const folders = new Set();
       for (const id of S.focusMode) { const t = S.nodes.get(id); if (t && t.schemaNode) folders.add(t.schemaNode); }
       for (const id of [...vis]) if (!S.focusMode.has(id) && !folders.has(id)) vis.delete(id);
+      for (const id of S.focusMode) { const n = S.nodes.get(id); if (n && n.kind !== "group" && n.kind !== "schema") vis.add(id); }
+    }
+    if (!S.linkedOnly.size) LINKED = new Set();
+    // Lakehouses showing their linked tables only: a dataset stays when it has a line to something else
+    // on the map (a notebook, pipeline, model, another lakehouse's table, or what stands in for it).
+    if (S.linkedOnly.size) {
+      const standIn = id => {
+        if (vis.has(id)) return id;
+        const m = S.nodes.get(id);
+        if (!m || !isTable(m) || !m.parent) return null;
+        const f = folderId(m.parent, secKeyOf(m));
+        return vis.has(f) ? f : vis.has(m.parent) ? m.parent : null;
+      };
+      const linked = new Set();
+      for (const e of S.edges.values()) for (const [a, b] of [[e.source, e.target], [e.target, e.source]]) {
+        const t = S.nodes.get(a);
+        if (!t || !isTable(t) || !S.linkedOnly.has(t.parent)) continue;      // also the ones in a collapsed folder
+        const r = standIn(b);
+        if (r && r !== a && r !== t.parent && r !== folderId(t.parent, secKeyOf(t))) linked.add(a);
+      }
+      LINKED = linked;
+      const keepFolders = new Set([...linked].map(id => { const t = S.nodes.get(id); return folderId(t.parent, secKeyOf(t)); }));
+      for (const id of [...vis]) { const n = S.nodes.get(id); if (n && isTable(n) && S.linkedOnly.has(n.parent) && !linked.has(id)) vis.delete(id); }
+      for (const id of [...vis]) { const n = S.nodes.get(id); if (n && n.kind === "schema" && S.linkedOnly.has(n.parent) && !keepFolders.has(id)) vis.delete(id); }
     }
     return vis;
   }
@@ -380,7 +405,9 @@
     const disp = id => {
       if (vis.has(id)) return id;
       const n = S.nodes.get(id);
-      return n && (n.kind === "table" || n.kind === "file") && n.parent && vis.has(n.parent) ? n.parent : null;
+      if (!n || (n.kind !== "table" && n.kind !== "file") || !n.parent) return null;
+      const f = folderId(n.parent, secKeyOf(n));            // a collapsed folder on the map stands for its datasets
+      return vis.has(f) ? f : vis.has(n.parent) ? n.parent : null;
     };
     const agg = new Map();
     for (const e of S.edges.values()) {
@@ -604,7 +631,7 @@
   // the data flow. Notebooks and the other items that move data sit in the gaps between the stores
   // they read and write, ordered by the height of what they connect to, so links cross as little as
   // possible. Items without links wait above, grouped like the left panel.
-  let LANES = [], BOXSET = null;
+  let LANES = [], BOXSET = null, LINKED = new Set();   // LINKED: datasets kept by "Linked tables only"
   const STORE_TYPES = new Set(["Lakehouse", "Warehouse", "SQLEndpoint", "MirroredDatabase", "KQLDatabase", "SQLDatabase"]);
   function layoutStructured(animate = true, anchor = null) {
     const LIT = S.focusIds && S.focusIds.size > 1 ? S.focusIds : null;   // the chain to line up, if any
@@ -695,10 +722,12 @@
         const fnode = k => { const f = S.nodes.get(folderId(n.id, k === "~Files" ? "files" : "t:" + k)); return f && vis.has(f.id) ? f : null; };
         for (const f of nodes) if (f.kind === "schema" && f.parent === n.id) { const k = f.sec === "files" ? "~Files" : f.sec.slice(2); if (!secs.has(k)) secs.set(k, []); }
         const secLit = k => LIT && secs.get(k).some(r => LIT.has(r.id)) ? 0 : 1;
-        const order = [...secs.keys()].sort((a, b) => secLit(a) - secLit(b) || (a === "~Files") - (b === "~Files") || a.localeCompare(b));
+        const man = S.secOrder.get(n.id), mi = k => { const i = man ? man.indexOf(k) : -1; return i < 0 ? 1e9 : i; };   // folders you moved
+        const order = [...secs.keys()].sort((a, b) => mi(a) - mi(b) || secLit(a) - secLit(b) || (a === "~Files") - (b === "~Files") || a.localeCompare(b));
         const heads = order.length > 1 || (order.length === 1 && order[0] !== "Tables") || order.some(fnode);
         for (const k of order) {
-          const rows = secs.get(k).sort((a, b) => (LIT ? LIT.has(b.id) - LIT.has(a.id) : 0) || byLabel(a, b)), sn = fnode(k);
+          const ro = S.rowOrder.get(`${n.id}|${k}`), ri = r => { const i = ro ? ro.indexOf(r.id) : -1; return i < 0 ? 1e9 : i; };   // datasets you moved
+          const rows = secs.get(k).sort((a, b) => ri(a) - ri(b) || (LIT ? LIT.has(b.id) - LIT.has(a.id) : 0) || byLabel(a, b)), sn = fnode(k);
           if (sn) { sn.w = cw - 20; target.set(sn.id, [colX[c], y + sn.h / 2]); y += sn.h + 8; lane.sections.push({node: sn.id}); }
           else if (heads && rows.length) { lane.sections.push({label: k === "~Files" ? "Files" : k, first: rows[0].id}); y += 22; }
           for (const r of rows) { const h = r._cols ? r.h : 24; r.w = cw - 20; r.h = h; target.set(r.id, [colX[c], y + h / 2]); lane.rows.push(r.id); y += h + 6; }
@@ -754,12 +783,66 @@
       const laneOf = new Map();
       for (const lane of LANES) { for (const id of lane.rows) laneOf.set(id, lane.id); for (const sc of lane.sections) if (sc.node) laneOf.set(sc.node, lane.id); }
       for (const [id, pos] of target) {
-        const own = S.offsets.get(id), lane = laneOf.has(id) ? S.offsets.get(laneOf.get(id)) : null;
+        const own = laneOf.has(id) ? null : S.offsets.get(id), lane = laneOf.has(id) ? S.offsets.get(laneOf.get(id)) : null;   // datasets and folders stay in their column
         const dx = (own ? own.dx : 0) + (lane ? lane.dx : 0), dy = (own ? own.dy : 0) + (lane ? lane.dy : 0);
         if (dx || dy) target.set(id, [pos[0] + dx, pos[1] + dy]);
       }
     }
+    if (S.opts.snap) keepApart(target);
     moveTo(target, animate, anchor);
+  }
+  // Nothing overlaps in the Structured view. A lakehouse column (its name, folders and the tables not
+  // moved on their own) is one block, everything else a block of its own. Blocks the user moved are
+  // placed last and nudged up or down to the nearest free spot; the tidy arrangement itself stays.
+  function keepApart(target) {
+    const GAP = 12, PAD = 10, laneOf = new Map(), blocks = new Map();
+    for (const lane of LANES) for (const id of [lane.id, ...lane.sections.filter(sc => sc.node).map(sc => sc.node), ...lane.rows]) laneOf.set(id, lane.id);
+    for (const [id, pos] of target) {
+      const n = S.nodes.get(id);
+      if (!n || !V.vis.has(id) || !n.w) continue;
+      const key = laneOf.get(id) || id, pad = laneOf.has(id) ? PAD : 0;
+      let b = blocks.get(key);
+      if (!b) blocks.set(key, b = {ids: [], x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity});
+      b.ids.push(id);
+      b.x0 = Math.min(b.x0, pos[0] - n.w / 2 - pad); b.x1 = Math.max(b.x1, pos[0] + n.w / 2 + pad);
+      b.y0 = Math.min(b.y0, pos[1] - n.h / 2 - pad); b.y1 = Math.max(b.y1, pos[1] + n.h / 2 + pad);
+    }
+    const moved = b => b.ids.some(id => S.offsets.has(id) || (laneOf.has(id) && S.offsets.has(laneOf.get(id))));
+    const byY = (a, b) => a.y0 - b.y0, list = [...blocks.values()];
+    const order = [...list.filter(b => !moved(b)).sort(byY), ...list.filter(moved).sort(byY)], placed = [];
+    const hit = (a, b) => a.x0 < b.x1 + GAP && b.x0 < a.x1 + GAP && a.y0 < b.y1 + GAP && b.y0 < a.y1 + GAP;
+    const free = (b, dy) => { const r = {x0: b.x0, x1: b.x1, y0: b.y0 + dy, y1: b.y1 + dy}; return !placed.some(p => hit(r, p)); };
+    for (const b of order) {
+      let dy = 0;
+      if (!free(b, 0)) {
+        const cands = placed.flatMap(p => [p.y1 + GAP - b.y0 + 1, p.y0 - GAP - b.y1 - 1]).sort((a, c) => Math.abs(a) - Math.abs(c));
+        dy = cands.find(c => free(b, c));
+        if (dy === undefined) dy = Math.max(...placed.map(p => p.y1)) + GAP - b.y0 + 1;
+      }
+      if (dy) for (const id of b.ids) { const pos = target.get(id); target.set(id, [pos[0], pos[1] + dy]); }
+      placed.push({x0: b.x0, x1: b.x1, y0: b.y0 + dy, y1: b.y1 + dy});
+    }
+  }
+  // While dragging in the Structured view: snap the item into line with a nearby one (centres or edges
+  // within 8 pixels) and return the guide lines to draw. Alt held down: no snapping.
+  function snapDrag(pr, kx, ky) {
+    const n = pr.node, own = [...pr.movers, ...pr.followers].find(g => g.m === n);
+    if (!own) return {sx: 0, sy: 0, guides: []};
+    const px = own.ox + kx, py = own.oy + ky, T = 8 / S.view.k, moving = new Set([...pr.movers, ...pr.followers].map(g => g.m.id));
+    let bx = null, by = null;
+    for (const o of V.nodes) {
+      if (moving.has(o.id) || o.kind === "group" || !Number.isFinite(o.x)) continue;
+      for (const [x, line] of [[o.x, o.x], [o.x - o.w / 2 + n.w / 2, o.x - o.w / 2], [o.x + o.w / 2 - n.w / 2, o.x + o.w / 2]]) {
+        const d = x - px; if (Math.abs(d) <= T && (!bx || Math.abs(d) < Math.abs(bx.d))) bx = {d, line, o};
+      }
+      for (const [y, line] of [[o.y, o.y], [o.y - o.h / 2 + n.h / 2, o.y - o.h / 2], [o.y + o.h / 2 - n.h / 2, o.y + o.h / 2]]) {
+        const d = y - py; if (Math.abs(d) <= T && (!by || Math.abs(d) < Math.abs(by.d))) by = {d, line, o};
+      }
+    }
+    const sx = bx ? bx.d : 0, sy = by ? by.d : 0, guides = [];
+    if (bx) guides.push({x: bx.line, y0: Math.min(py + sy - n.h / 2, bx.o.y - bx.o.h / 2) - 8, y1: Math.max(py + sy + n.h / 2, bx.o.y + bx.o.h / 2) + 8});
+    if (by) guides.push({y: by.line, x0: Math.min(px + sx - n.w / 2, by.o.x - by.o.w / 2) - 8, x1: Math.max(px + sx + n.w / 2, by.o.x + by.o.w / 2) + 8});
+    return {sx, sy, guides};
   }
   function moveTo(target, animate, anchor = null) {
     // keep the anchor (the item just clicked) where it is on screen while everything else moves
@@ -915,6 +998,24 @@
     if (k < 0.5) farLabels(act, k);
     drawBadge(k);
     const pr = S.press;
+    if (pr && pr.type === "node" && pr.moved && pr.slot) {                         // the dragged dataset on top, and where it will go
+      ctx.setTransform(DPR * k, 0, 0, DPR * k, DPR * ox, DPR * oy);
+      for (const g of [...pr.followers, ...pr.movers]) drawNode(g.m, act, k, t);
+      if (pr.insert) {
+        const g = pr.insert;
+        ctx.save(); ctx.setLineDash([]); ctx.strokeStyle = C.read; ctx.fillStyle = C.read; ctx.lineWidth = 2.5 / k;
+        ctx.beginPath(); ctx.moveTo(g.x0, g.y); ctx.lineTo(g.x1, g.y); ctx.stroke();
+        for (const x of [g.x0, g.x1]) { ctx.beginPath(); ctx.arc(x, g.y, 3.5 / k, 0, 7); ctx.fill(); }
+        ctx.restore();
+      }
+    }
+    if (pr && pr.type === "node" && pr.moved && pr.guides && pr.guides.length) {     // snap guides
+      ctx.setTransform(DPR * k, 0, 0, DPR * k, DPR * ox, DPR * oy);
+      ctx.save(); ctx.setLineDash([4 / k, 3 / k]); ctx.lineWidth = 1.2 / k; ctx.strokeStyle = C.run;
+      for (const g of pr.guides) { ctx.beginPath(); if (g.x !== undefined) { ctx.moveTo(g.x, g.y0); ctx.lineTo(g.x, g.y1); } else { ctx.moveTo(g.x0, g.y); ctx.lineTo(g.x1, g.y); } ctx.stroke(); }
+      ctx.restore();
+    }
+    if (S.flash) { if (performance.now() - S.flash.t0 < 1400) requestDraw(); else S.flash = null; }
     if (pr && pr.type === "box" && pr.moved) {
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
       const bx = Math.min(pr.x0, pr.x1), by = Math.min(pr.y0, pr.y1), bw = Math.abs(pr.x1 - pr.x0), bh = Math.abs(pr.y1 - pr.y0);
@@ -1062,6 +1163,11 @@
     const x = n.x - n.w / 2, y = n.y - n.h / 2, st = state(n);
     const selected = isSel(n.id), hovered = S.hover === n.id || (BOXSET !== null && BOXSET.has(n.id));
     const pinned = S.pinned === n.id;
+    if (S.flash && S.flash.id === n.id) {                     // just found: an expanding ring
+      const p = Math.min(1, (performance.now() - S.flash.t0) / 1400), g = 6 + 22 * p;
+      ctx.save(); ctx.globalAlpha = 1 - p; ctx.setLineDash([]); ctx.lineWidth = 3; ctx.strokeStyle = C.read;
+      ctx.beginPath(); rr(x - g, y - g, n.w + 2 * g, n.h + 2 * g, 8 + g); ctx.stroke(); ctx.restore();
+    }
     if (pinned) {
       ctx.beginPath(); rr(x - 9, y - 9, n.w + 18, n.h + 18, n.kind === "group" || (n.type === "Lakehouse" && n.kind === "item") ? (n.h + 18) / 2 : 10);
       ctx.setLineDash([]); ctx.lineWidth = 2.5; ctx.strokeStyle = C.ink; ctx.stroke();
@@ -1209,7 +1315,9 @@
     else S.shown.add(id);
     rebuildView();
     select(id);
-    setTimeout(() => centerOn(S.nodes.get(id)), 60);
+    // once the Structured view has finished rearranging, centre on it and make it pulse
+    setTimeout(() => { const m = S.nodes.get(id); if (m && V.vis.has(id)) { centerOn(m); S.flash = {id, t0: performance.now()}; requestDraw(); } },
+      S.layout === "struct" ? 520 : 80);
   }
 
   // ============================================================ selection and lineage
@@ -1250,6 +1358,7 @@
       if (!S.nodes.has(S.pinned)) S.pinned = null;
       else { S.active = activeFor(S.nodes.get(S.pinned)); return; }
     }
+    if (S.hl === "none") { S.active = null; return; }        // Selected only: nothing else lights up or dims
     if (S.selEdge) { const e = V.edges.find(x => x.id === S.selEdge); S.active = e ? new Set([e.source, e.target]) : null; return; }
     if (S.multi.size > 1) {                                  // several selected: what they share, upstream and downstream
       const start = [];
@@ -1260,7 +1369,7 @@
         if (n && ((n.kind === "item" && n.type === "Lakehouse") || n.kind === "missing" || n.kind === "external" || n.external))
           for (const m of V.nodes) if (m.parent === id) start.push(m.id);
       }
-      S.active = start.length ? lineage(start, S.hl === "full") : null;
+      S.active = start.length ? lineage(start, S.hl !== "direct") : null;
       return;
     }
     S.active = activeFor(S.sel && S.nodes.get(S.sel));
@@ -1269,7 +1378,7 @@
   function activeFor(n) {
     if (!n || !V.vis.has(n.id)) return null;
     if (isTable(n)) {
-      const a = thread(n.id, S.threadDir, S.hl === "full");
+      const a = thread(n.id, S.threadDir, S.hl !== "direct");
       return a.size <= 2 ? null : a;                         // only itself (and its lakehouse): nothing to light up
     }
     let start = [n.id];
@@ -1277,12 +1386,13 @@
     else if (n.kind === "schema") start = [n.id, ...V.nodes.filter(m => m.schemaNode === n.id).map(m => m.id)];
     else if ((n.kind === "item" && n.type === "Lakehouse") || n.kind === "missing" || n.kind === "external" || n.external)
       start = [n.id, ...V.nodes.filter(m => m.parent === n.id).map(m => m.id)];
-    const a = lineage(start, S.hl === "full");
+    const a = lineage(start, S.hl !== "direct");
     return a.size <= start.length && n.kind !== "group" ? null : a;   // nothing linked yet: don't dim the map
   }
   // Pin: keep this node's lineage highlighted while other items are clicked and selected
   function pinHighlight(id) {
     if (!S.nodes.has(id)) return;
+    ensureHighlight();
     S.pinned = id;
     select(id, false);
     renderTitle();
@@ -1331,6 +1441,7 @@
     S.threadDir = dir; store.set("threadDir", dir);
     const n = S.sel && S.nodes.get(S.sel);
     if (n && isTable(n) && !S.focusMode) { revealLineage(n.id); return; }
+    if (S.focusMode) refreshFocus();
     computeActive(); renderDetails(); renderTree(); requestDraw(); refocus();
   }
   function lineage(start, full, G = V) {
@@ -1349,6 +1460,16 @@
     }
     return finishActive(set, start, G);
   }
+  // the lineage of one item worked out on graph G (a dataset: its thread in the chosen direction)
+  function lineageOf(id, G) {
+    const n = S.nodes.get(id), full = S.hl !== "direct";
+    if (!n) return new Set();
+    if (isTable(n)) return thread(id, S.threadDir, full, G);
+    let start = [id];
+    if (n.kind === "group") start = [id, ...n.members];
+    else if (n.kind === "item" && n.type === "Lakehouse") start = [id, ...[...S.nodes.values()].filter(m => m.parent === id && isTable(m) && G.adj.has(m.id)).map(m => m.id)];
+    return lineage(start, full, G);
+  }
   // every relation the app knows, also between items that aren't on the map
   function fullGraph() {
     const out = new Map(), inn = new Map(), adj = new Map();
@@ -1359,19 +1480,21 @@
   // Show all relations of an item or dataset: its lineage (a dataset's thread, in the chosen
   // direction) is worked out on everything known and put on the map, ticking those items, then
   // highlighted. Focus mode keeps to what is focused.
+  // Asking for a lineage on purpose (Show its lineage, a thread, pinning) while on Selected only:
+  // switch to Full lineage so it can be seen.
+  function ensureHighlight() {
+    if (S.hl !== "none") return;
+    S.hl = "full"; store.set("hl", S.hl);
+    for (const o of document.querySelectorAll("[data-hl]")) o.setAttribute("aria-pressed", String(o.dataset.hl === "full"));
+    toast("Highlighting is on again (Full lineage) to show the lineage you asked for.");
+  }
   function revealLineage(id) {
     const n = S.nodes.get(id);
     if (!n) return;
+    ensureHighlight();
     if (S.pinned && S.pinned !== id) S.pinned = id;
     if (S.focusMode) { select(id); return; }
-    const G = fullGraph(), full = S.hl === "full";
-    let set;
-    if (isTable(n)) set = thread(id, S.threadDir, full, G);
-    else {
-      let start = [id];
-      if (n.kind === "item" && n.type === "Lakehouse") start = [id, ...[...S.nodes.values()].filter(m => m.parent === id && isTable(m) && G.adj.has(m.id)).map(m => m.id)];
-      set = lineage(start, full, G);
-    }
+    const set = lineageOf(id, fullGraph());
     let tables = false;
     for (const x of set) {
       const m = S.nodes.get(x);
@@ -1480,7 +1603,46 @@
   canvas.addEventListener("contextmenu", ev => ev.preventDefault());
   // What moves when a node is dragged: the whole selection when the node is part of it, otherwise
   // the node. In the structured view a lakehouse brings its column (tables, schema headings).
+  // where a node sits inside a lakehouse column of the Structured view
+  const rowKey = r => r.kind === "file" ? "~Files" : (r.schema || "Tables");
+  const folderKey = f => f.sec === "files" ? "~Files" : String(f.sec || "").slice(2);
+  const secRows = (lane, key) => lane.rows.filter(id => { const r = S.nodes.get(id); return r && rowKey(r) === key; });
+  function laneSlot(n) {
+    for (const lane of LANES) {
+      if (lane.rows.includes(n.id)) return {lane, kind: "row", key: rowKey(n)};
+      if (lane.sections.some(sc => sc.node === n.id)) return {lane, kind: "section", key: folderKey(n)};
+    }
+    return null;
+  }
+  // Where a dragged dataset (or folder) would go in its column: the place among the others, and the line to show it
+  function slotInsert(pr) {
+    const {lane, kind, key} = pr.slot, moving = new Set([...pr.movers, ...pr.followers].map(g => g.m.id));
+    const head = pr.movers[0].m, x0 = head.x - head.w / 2, x1 = head.x + head.w / 2;
+    if (kind === "row") {
+      const cy = pr.movers.reduce((a, g) => a + g.m.y, 0) / pr.movers.length;
+      const sib = secRows(lane, key).filter(id => !moving.has(id)).map(id => S.nodes.get(id)).sort((a, b) => a.y - b.y);
+      let i = sib.findIndex(r => cy < r.y); if (i < 0) i = sib.length;
+      const y = !sib.length ? cy : i === 0 ? sib[0].y - sib[0].h / 2 - 3 : i === sib.length ? sib[i - 1].y + sib[i - 1].h / 2 + 3
+        : (sib[i - 1].y + sib[i - 1].h / 2 + sib[i].y - sib[i].h / 2) / 2;
+      return {index: i, order: sib.map(r => r.id), y, x0, x1};
+    }
+    const secs = lane.sections.map(sc => {
+      const f = sc.node && S.nodes.get(sc.node), first = !f && S.nodes.get(sc.first);
+      return {key: f ? folderKey(f) : sc.label === "Files" ? "~Files" : sc.label, y: f ? f.y : first ? first.y - 15 : 0};
+    }).filter(sc => sc.key !== key).sort((a, b) => a.y - b.y);
+    let i = secs.findIndex(sc => head.y < sc.y); if (i < 0) i = secs.length;
+    const bottom = Math.max(...lane.rows.filter(id => !moving.has(id)).map(id => { const r = S.nodes.get(id); return r.y + r.h / 2; }), head.y);
+    return {index: i, order: secs.map(sc => sc.key), y: i < secs.length ? secs[i].y - 16 : bottom + 6, x0, x1};
+  }
   function dragSet(n) {
+    const pick = id => { const m = S.nodes.get(id); return {m, ox: m.x, oy: m.y}; };
+    const slot = S.layout === "struct" ? laneSlot(n) : null;
+    if (slot && slot.kind === "row") {                    // a dataset stays in its lakehouse: it moves within its folder
+      const ids = (S.multi.has(n.id) && S.multi.size > 1 ? [...S.multi] : [n.id])
+        .filter(id => { const m = S.nodes.get(id); return m && slot.lane.rows.includes(id) && rowKey(m) === slot.key; });
+      return {movers: ids.map(pick), followers: [], slot};
+    }
+    if (slot && slot.kind === "section") return {movers: [pick(n.id)], followers: secRows(slot.lane, slot.key).map(pick), slot};
     const set = new Set((S.multi.has(n.id) && S.multi.size > 1 ? [...S.multi] : [n.id]).filter(id => V.vis.has(id)));
     const followers = new Set();
     if (S.layout === "struct") for (const id of [...set]) {
@@ -1489,7 +1651,6 @@
       for (const r of [...lane.rows, ...lane.sections.filter(sc => sc.node).map(sc => sc.node)])
         if (V.vis.has(r)) { followers.add(r); set.delete(r); }
     }
-    const pick = id => { const m = S.nodes.get(id); return {m, ox: m.x, oy: m.y}; };
     return {movers: [...set].map(pick), followers: [...followers].filter(id => !set.has(id)).map(pick)};
   }
   function nodesInBox(pr) {
@@ -1503,7 +1664,7 @@
     canvas.focus({preventScroll: true});
     canvas.setPointerCapture(ev.pointerId);
     const p = toWorld(ev);
-    if (panButton) { S.press = {type: "pan", sx: ev.clientX, sy: ev.clientY, vx: S.view.x, vy: S.view.y, moved: false, quiet: true, rnode: ev.button === 2 ? hitNode(p) : null}; return; }
+    if (panButton) { S.press = {type: "pan", sx: ev.clientX, sy: ev.clientY, vx: S.view.x, vy: S.view.y, moved: false, quiet: true, rnode: ev.button === 2 ? hitNode(p) || hitHeading(p) : null}; return; }
     const badge = hitBadge(p);
     if (badge) { S.press = {type: "badge", node: badge}; return; }
     const n = hitNode(p);
@@ -1524,8 +1685,15 @@
       if (!pr.moved) { Object.assign(pr, dragSet(pr.node)); S.tween = null; }
       pr.moved = true; canvas.classList.add("dragging");
       const kx = dx / S.view.k, ky = dy / S.view.k;
+      if (pr.slot) {                                          // inside a lakehouse column: up and down only
+        for (const g of [...pr.movers, ...pr.followers]) { g.m.x = g.ox; g.m.y = g.oy + ky; }
+        pr.insert = slotInsert(pr); pr.guides = [];
+        requestDraw(); hideTip(); return;
+      }
+      const snap = S.layout === "struct" && S.opts.snap && !ev.altKey ? snapDrag(pr, kx, ky) : {sx: 0, sy: 0, guides: []};
+      pr.guides = snap.guides;
       for (const g of [...pr.movers, ...pr.followers]) {
-        g.m.x = g.ox + kx; g.m.y = g.oy + ky; g.m.vx = g.m.vy = 0;
+        g.m.x = g.ox + kx + snap.sx; g.m.y = g.oy + ky + snap.sy; g.m.vx = g.m.vy = 0;
         if (S.layout !== "struct") g.m.fixed = true;
       }
       if (S.layout === "struct") requestDraw(); else reheat(0.12);
@@ -1542,10 +1710,10 @@
       pr.moved = true; canvas.classList.add("dragging");
       S.view.x = pr.vx + dx; S.view.y = pr.vy + dy; requestDraw(); hideTip(); return;
     }
-    const n = hitNode(p), e = n ? null : hitEdge(p), b = hitBadge(p);
+    const n = hitNode(p), e = n ? null : hitEdge(p), b = hitBadge(p), hd = n || e || b ? null : hitHeading(p);
     const hid = n ? n.id : (b ? b.id : null);
     if (hid !== S.hover || (e && e.id) !== S.hoverEdge) { S.hover = hid; S.hoverEdge = e ? e.id : null; markHover(); requestDraw(); }
-    canvas.classList.toggle("pointing", !!(n || e || b));
+    canvas.classList.toggle("pointing", !!(n || e || b || hd));
     if (b) showTip(ev, `<strong>Open in Fabric</strong><span>${esc(b.label)}</span>`);
     else if (n) {
       const tg = toggleOf(n);
@@ -1554,6 +1722,7 @@
       else showTip(ev, tipFor(n));
     }
     else if (e) showTip(ev, tipForEdge(e));
+    else if (hd) showTip(ev, `<strong>${esc(hd.fullName)}</strong><span>Right-click to show or hide its datasets and their columns</span>`);
     else hideTip();
   });
   const endPress = ev => {
@@ -1567,11 +1736,25 @@
       requestDraw(); return;
     }
     if (pr.moved) {
+      if (pr.type === "node" && pr.slot) {                    // dropped inside its column: take that place, the others make room
+        const ins = slotInsert(pr), order = [...ins.order];
+        if (pr.slot.kind === "row") {
+          const mv = pr.movers.slice().sort((a, b) => a.oy - b.oy).map(g => g.m.id);
+          order.splice(ins.index, 0, ...mv);
+          S.rowOrder.set(`${pr.slot.lane.id}|${pr.slot.key}`, order);
+          for (const id of mv) S.offsets.delete(id);
+        } else {
+          order.splice(ins.index, 0, pr.slot.key);
+          S.secOrder.set(pr.slot.lane.id, order);
+        }
+        layoutStructured(true);
+        return;
+      }
       if (pr.type === "node") {
-        if (S.layout === "struct") {                 // remember the move relative to the tidy arrangement
-          const dx = (ev.clientX - pr.sx) / S.view.k, dy = (ev.clientY - pr.sy) / S.view.k;
+        if (S.layout === "struct") {                 // remember the move relative to the tidy arrangement (snap included)
+          const g0 = pr.movers[0] || pr.followers[0], dx = g0 ? g0.m.x - g0.ox : 0, dy = g0 ? g0.m.y - g0.oy : 0;
           for (const g of pr.movers) { const o = S.offsets.get(g.m.id) || {dx: 0, dy: 0}; S.offsets.set(g.m.id, {dx: o.dx + dx, dy: o.dy + dy}); }
-          requestDraw();
+          if (S.opts.snap) layoutStructured(true); else requestDraw();     // nudged apart if it landed on something
         } else reheat(0.1);
       }
       return;
@@ -1643,17 +1826,45 @@
   function toggleGroupOnMap(gid) { const g = S.nodes.get(gid); if (g) setGroupOnMap(gid, !groupAllOn(g)); }
   function onMap(id, on) {
     if (on) { S.hidden.delete(id); S.shown.add(id); } else { S.hidden.add(id); S.shown.delete(id); }
-    if (on && S.focusMode) { S.focusMode.add(id); const n = S.nodes.get(id); if (n && n.parent) S.focusMode.add(n.parent); }
+    if (S.focusMode) {                                      // ticking inside focus adds to it, unticking takes out
+      if (on) { S.focusMode.add(id); S.focusExtra.add(id); S.focusOut.delete(id); const n = S.nodes.get(id); if (n && n.parent) S.focusMode.add(n.parent); }
+      else { S.focusMode.delete(id); S.focusOut.add(id); S.focusExtra.delete(id); }
+    }
   }
+  // Focus mode keeps to the lineage of one item (the pinned one, else the selection): worked out on
+  // everything known, so it shows also what isn't ticked, and worked out again when Direct links /
+  // Full lineage or a dataset's direction changes. Your tickboxes are left as they are.
+  const withParents = set => { const out = new Set(set); for (const id of set) { const n = S.nodes.get(id); if (n && n.parent && S.nodes.has(n.parent)) out.add(n.parent); } return out; };
+  function focusLineage(anchor) { const G = fullGraph(), set = new Set(); for (const a of anchor) for (const x of lineageOf(a, G)) set.add(x); return set; }
   function enterFocus(set) {
-    const src = set || S.active;
-    if (!src || !src.size) { toast("Select something first: focus mode keeps what is highlighted."); return; }
-    S.focusMode = new Set(src);
-    for (const id of src) { const n = S.nodes.get(id); if (n && n.parent) S.focusMode.add(n.parent); }
+    let anchor = null, src = set || null;
+    if (!src) {
+      if (S.selEdge) src = S.active;
+      else {
+        anchor = S.pinned ? [S.pinned] : S.multi.size > 1 ? [...S.multi] : S.sel ? [S.sel] : null;
+        src = anchor ? focusLineage(anchor) : null;
+      }
+    }
+    if (!src || !src.size) { toast("Select something first: focus mode keeps to its lineage."); return; }
+    S.focusAnchor = anchor; S.focusExtra = new Set(); S.focusOut = new Set();
+    S.focusMode = withParents(src);
     afterVisibility();
     setTimeout(() => fit(true), S.layout === "struct" ? 480 : 60);   // after the Structured view has rearranged
   }
-  function leaveFocus() { if (!S.focusMode) return; S.focusMode = null; afterVisibility(); }
+  function refreshFocus() {
+    if (!S.focusMode || !S.focusAnchor) return;
+    const set = focusLineage(S.focusAnchor);
+    for (const x of S.focusExtra) set.add(x);
+    for (const x of S.focusOut) set.delete(x);
+    S.focusMode = withParents(set);
+    afterVisibility();
+    setTimeout(() => fit(true), S.layout === "struct" ? 480 : 60);
+  }
+  function leaveFocus() {
+    if (!S.focusMode) return;
+    S.focusMode = null; S.focusAnchor = null; S.focusExtra = new Set(); S.focusOut = new Set();
+    afterVisibility();
+  }
   // the lakehouses (in this workspace) holding the tables and folders an item reads or writes
   function lakesOf(id) {
     const out = new Set();
@@ -1674,7 +1885,7 @@
       const t = o && S.nodes.get(o);
       if (!isTable(t)) continue;
       S.hidden.delete(o);
-      if (S.focusMode) { S.focusMode.add(o); if (t.parent) S.focusMode.add(t.parent); }
+      if (S.focusMode) { S.focusMode.add(o); S.focusExtra.add(o); if (t.parent) S.focusMode.add(t.parent); }
     }
   }
   function tablesOn() { if (!S.opts.tables) { S.opts.tables = true; store.set("opts", S.opts); const box = document.querySelector('[data-opt="tables"]'); if (box) box.checked = true; } }
@@ -1731,12 +1942,17 @@
     return S.contents.has(lid) || (d.length > 0 && d.every(x => V.vis.has(x.id)));
   };
   function folderIds(fid) { const f = S.nodes.get(fid); return f ? lakeData(f.parent).filter(t => secKeyOf(t) === f.sec).map(t => t.id) : []; }
-  const folderOpen = fid => { const ids = folderIds(fid); return ids.length > 0 && ids.every(id => V.vis.has(id)); };
+  const folderOpen = fid => {                               // with Linked tables only, its linked datasets are what counts
+    const f = S.nodes.get(fid); let ids = folderIds(fid);
+    if (f && S.linkedOnly.has(f.parent)) ids = ids.filter(id => LINKED.has(id));
+    return ids.length > 0 && ids.every(id => V.vis.has(id));
+  };
   // + on a lakehouse: read it if needed, then its folders with all their datasets (a very big one
   // asks first; "no" shows just the folders, each with its own +). foldersOnly: just the folders.
   function expandLake(lid, foldersOnly = false) {
     const lh = S.nodes.get(lid);
     if (!lh) return;
+    S.linkedOnly.delete(lid);                               // "all datasets" / "folders only" ask for exactly that
     onMap(lid, true);
     if (lh.external) { setDataOnMap(lakeData(lid).map(d => d.id), true); return; }
     if (!S.scans.has(lh.itemId)) {                          // load it first; this continues when the read is done
@@ -1752,11 +1968,27 @@
       S.contents.add(lid);
       for (const d of data) onMap(d.id, true);
       tablesOn();
+    } else {                                                // folders only: each folder collapsed, + opens it
+      S.contents.delete(lid);
+      for (const d of data) onMap(d.id, false);
     }
     afterVisibility();
   }
   // − on a lakehouse: its folders and every dataset off the map (links then point at the lakehouse)
+  // Linked tables only, for one lakehouse. On: its datasets that have a known link are put on the map,
+  // and the filter keeps only the ones with a line to something on the map.
+  function setLinkedOnly(lid, on) {
+    if (on) {
+      S.linkedOnly.add(lid);
+      const known = new Set();
+      for (const e of S.edges.values()) { known.add(e.source); known.add(e.target); }
+      for (const d of lakeData(lid)) if (known.has(d.id)) onMap(d.id, true);
+      onMap(lid, true); tablesOn();
+    } else S.linkedOnly.delete(lid);
+    afterVisibility();
+  }
   function collapseLake(lid) {
+    S.linkedOnly.delete(lid);
     const data = lakeData(lid);
     resetLake(lid);
     for (const d of data) onMap(d.id, false);
@@ -1873,14 +2105,6 @@
     }
     afterVisibility();
   }
-  function focusLineage() {
-    if (!S.active) return;
-    const keep = new Set(S.active);
-    for (const n of S.nodes.values()) if (n.kind === "item" && !n.external) onMap(n.id, keep.has(n.id));
-    afterVisibility();
-    setTimeout(() => fit(true, keep), 60);
-    toast("Showing only this lineage. Show all, in the left panel, puts everything back.");
-  }
 
   // ---- Table content tab: a table's column names, read when asked for
   function setLeftTab(tab) {
@@ -1994,14 +2218,25 @@
     return mode === "used" ? cols.filter(c => c.used && !c.hidden) : cols;   // In use: what a model shows, hidden ones left out
   }
   function setColsOnMap(ids, mode) {
+    const load = [];
     for (const id of ids) {
       const n = S.nodes.get(id);
       if (!n || n.kind !== "table") continue;
       if (mode === "off") S.colsOnMap.delete(id);
-      else { S.colsOnMap.set(id, mode); if (!S.colCache.has(colKey(n))) loadColumns(n); }
+      else { S.colsOnMap.set(id, mode); if (!S.colCache.has(colKey(n))) load.push(n); }
     }
     rebuildView(false); renderDetails(); requestDraw();
+    if (load.length) loadColumnsMany(load);
   }
+  // read the columns of many tables, four at a time
+  async function loadColumnsMany(list) {
+    const queue = [...list];
+    const worker = async () => { while (queue.length) await loadColumns(queue.shift()); };
+    await Promise.all(Array.from({length: Math.min(4, queue.length)}, worker));
+  }
+  // one map rebuild for a burst of changes (e.g. many tables' columns arriving)
+  let rebuildTimer = 0;
+  function rebuildSoon() { if (!rebuildTimer) rebuildTimer = setTimeout(() => { rebuildTimer = 0; rebuildView(false); }, 60); }
   const colKey = n => { const p = n && S.nodes.get(n.parent); return p && p.kind === "item" ? [p.workspaceId, p.itemId, n.schema || "", n.table || n.label].join("|").toLowerCase() : ""; };
   async function loadColumns(n, refresh = false) {
     const key = colKey(n), p = S.nodes.get(n.parent);
@@ -2014,7 +2249,7 @@
     catch (err) { S.colCache.set(key, {columns: [], error: err.message, hint: err.hint || ""}); }
     finally {
       S.colLoading.delete(key); renderColumns(); refreshLog(); renderDetails();
-      if (S.colsOnMap.has(n.id)) rebuildView(false);
+      if (S.colsOnMap.has(n.id)) rebuildSoon();
     }
   }
   function tablesNear() {
@@ -2161,7 +2396,11 @@
     }
     if (!bar) return;
     bar.hidden = !S.focusMode;
-    if (S.focusMode) $("#focusText").textContent = `Focus mode: the map shows only the ${V.nodes.filter(n => n.kind !== "group").length} items that were highlighted, and anything you tick.`;
+    if (S.focusMode) {
+      const a = S.focusAnchor, an = a && a.length === 1 && S.nodes.get(a[0]), count = V.nodes.filter(n => n.kind !== "group").length;
+      const what = !a ? "what was highlighted" : an ? `${an.fullName || an.label}${isTable(an) ? ` (${{in: "where it comes from", out: "where it goes", both: "both ways"}[S.threadDir]})` : ""}` : `${a.length} items`;
+      $("#focusText").textContent = `Focus mode on ${what}, ${S.hl === "direct" ? "direct links" : "full lineage"}: ${count} items. Anything you tick is added.`;
+    }
   }
   function renderTitle() {
     renderFocus();
@@ -2369,6 +2608,7 @@
     html += refList("Written by", w2, coverage) || (nbs.length ? `<div class="d-sec">Written by</div>${coverage}<p class="muted">Nothing found yet.</p>` : "");
     html += refList("Read by", r2) + refList("Maintained by", m2) + refList("Used by semantic models", models) + refList("Shortcut sources", sc2);
     html += relationsHtml([n.id], ["in:default_lakehouse", "in:attached", "in:references", "out:references"]);
+    html += lakeCtl(n);
     if (sc.status === "ok") {
       const tables = (d.tables || []).map(id => S.nodes.get(id)).filter(Boolean);
       const shown = S.contents.has(n.id);
@@ -2388,7 +2628,7 @@
     const only = S.modelColsVisibleOnly, src = modelSourceTables(n.id);
     let html = `<div class="d-sec">Model tables <small>${d.tables.length}</small></div>
       <label class="tick-line"><input type="checkbox" data-modelonly ${only ? "checked" : ""}> Only the model's visible columns</label>
-      ${src.length ? colsMapCtl(src, n.id) : ""}<ul class="mt-list">`;
+      ${src.length ? colsMapCtl(src, "model:" + n.id) : ""}<ul class="mt-list">`;
     for (const t of d.tables) {
       const key = `${n.id}|${t.table}`, open = S.modelColsOpen.has(key) ? S.modelColsOpen.get(key) : d.tables.length <= 8;
       const s = t.source && S.nodes.get(t.source), cols = t.columns || [];
@@ -2422,12 +2662,21 @@
     return `<p class="dd-note">${rows.length} column${rows.length === 1 ? "" : "s"}${only ? "" : `, ${visible} visible in the model`}.</p>
       <table class="tbl cols">${rows.map(r => `<tr class="${r.cls}"><td>${esc(r.name)}</td><td class="num">${esc(r.type)}</td><td>${esc(r.note)}</td></tr>`).join("")}</table>`;
   }
-  // Columns on the map for one table, or for all the tables of a model: Off / All / In use
-  function colsMapCtl(ids, modelId = "") {
+  // a lakehouse: its folders on the map (all at once), and the columns of its tables on the map
+  function lakeCtl(n) {
+    const on = S.folderMode.has(n.id), tables = lakeData(n.id).filter(t => t.kind === "table" && V.vis.has(t.id)).map(t => t.id);
+    return `<div class="thread-ctl"><span>Folders on the map</span><div class="seg" role="group" aria-label="Its folders on the map">
+        <button data-lakefold="on" data-id="${esc(n.id)}" aria-pressed="${on}" title="Show all its schemas and folders on the map">Show all</button>
+        <button data-lakefold="off" data-id="${esc(n.id)}" aria-pressed="${!on}" title="Take all its folders off the map">Hide all</button></div></div>
+      <label class="tick-line" title="Only its datasets with a line to something on the map; the others are left out"><input type="checkbox" data-linkedonly="${esc(n.id)}" ${S.linkedOnly.has(n.id) ? "checked" : ""}> Linked tables only</label>
+      ${tables.length ? colsMapCtl(tables, "lake:" + n.id) : '<p class="d-note">Columns can be shown once some of its tables are on the map.</p>'}`;
+  }
+  // Columns on the map for one table, or for all the tables of a model or lakehouse: Off / All / In use
+  function colsMapCtl(ids, scope = "") {
     const modes = ids.map(id => S.colsOnMap.get(id) || "off"), mode = modes.every(m => m === modes[0]) ? modes[0] : "";
     const used = ids.some(id => [...modelUse(id).values()].some(u => !u.hidden));
-    const b = (m, label, title, dis = false) => `<button data-colsmap="${m}" ${modelId ? `data-model="${esc(modelId)}"` : ""} aria-pressed="${mode === m}" ${dis ? "disabled" : ""} title="${title}">${label}</button>`;
-    return `<div class="thread-ctl"><span>${modelId ? "Columns of its tables on the map" : "Columns on the map"}</span><div class="seg" role="group" aria-label="Columns on the map">
+    const b = (m, label, title, dis = false) => `<button data-colsmap="${m}" ${scope ? `data-scope="${esc(scope)}"` : ""} aria-pressed="${mode === m}" ${dis ? "disabled" : ""} title="${title}">${label}</button>`;
+    return `<div class="thread-ctl"><span>${scope ? "Columns of its tables on the map" : "Columns on the map"}</span><div class="seg" role="group" aria-label="Columns on the map">
       ${b("off", "Off", "Don't show columns on the map")}${b("all", "All", "Show all the columns on the map")}
       ${b("used", "In use", used ? "Only the columns a semantic model shows (columns it hides are left out)" : "No semantic model read so far shows these columns", !used)}</div></div>`;
   }
@@ -2658,16 +2907,34 @@
   const menu = $("#ctxMenu");
   function menuItems(n) {
     const many = S.multi.size > 1 && S.multi.has(n.id), items = [];
-    if (!many && n.kind === "item" && n.type === "Lakehouse") {
-      if (!lakeOpen(n.id)) items.push({label: "Expand: show its datasets", run: () => expandLake(n.id)});
-      if (!n.external) items.push({label: "Show its folders only", run: () => expandLake(n.id, true)});
-      if (lakeData(n.id).some(d => V.vis.has(d.id)) || S.folderMode.has(n.id)) items.push({label: "Collapse: hide its datasets", run: () => collapseLake(n.id)});
+    if (!many && n.kind === "item" && n.type === "Lakehouse") {      // how much of it is open, the current one ticked
+      const st = lakeState(n.id);
+      items.push({label: "Collapsed: just the lakehouse", on: st === "collapsed", run: () => collapseLake(n.id)});
+      if (!n.external) items.push({label: "Folders only, each collapsed", on: st === "folders", run: () => expandLake(n.id, true)});
+      items.push({label: n.external ? "All its known datasets" : "Folders and all datasets", on: st === "all", run: () => expandLake(n.id)});
+      items.push({sep: true});
+      items.push({label: "Linked tables only", check: true, on: S.linkedOnly.has(n.id), run: () => setLinkedOnly(n.id, !S.linkedOnly.has(n.id))});
       items.push({sep: true});
     }
     if (!many && n.kind === "schema") {
       items.push({label: folderOpen(n.id) ? "Collapse: hide its datasets" : "Expand: show its datasets", run: () => toggleNode(n)});
       items.push({sep: true});
     }
+    if (!many && n.kind === "heading") {                       // a folder heading: its datasets on or off
+      const ids = sectionTables(n.parent, n.sec).map(t => t.id), open = ids.length > 0 && ids.every(id => V.vis.has(id));
+      items.push({label: open ? "Collapse: hide its datasets" : "Expand: show its datasets", run: () => setDataOnMap(ids, !open)});
+      items.push({sep: true});
+    }
+    const ct = colTargets(n, many), cols = ct.show;            // columns on the map, for one table or many
+    if (cols.length || ct.hide.length) {
+      const what = c => !many && n.kind === "table" ? "" : ` (${c} table${c === 1 ? "" : "s"})`;
+      if (cols.some(id => S.colsOnMap.get(id) !== "all")) items.push({label: `Show columns${what(cols.length)}`, run: () => setColsOnMap(cols, "all")});
+      if (cols.some(id => S.colsOnMap.get(id) !== "used") && cols.some(id => [...modelUse(id).values()].some(u => !u.hidden)))
+        items.push({label: `Show columns in use${what(cols.length)}`, run: () => setColsOnMap(cols, "used")});
+      if (ct.hide.length) items.push({label: `Hide columns${what(ct.hide.length)}`, run: () => setColsOnMap(ct.hide, "off")});
+      items.push({sep: true});
+    }
+    if (n.kind === "heading") { if (items.length && items[items.length - 1].sep) items.pop(); return items; }
     if (!many && isTable(n)) {
       const cur = S.sel === n.id ? S.threadDir : null;
       for (const [dir, label] of [["both", "Show its thread: inputs and outputs"], ["in", "Show where it comes from (inputs)"], ["out", "Show where it goes (outputs)"]])
@@ -2693,6 +2960,56 @@
     if (!many && n.url) items.push({label: "Open in Fabric", run: () => openUrl(n)});
     return items;
   }
+  // collapsed (nothing of it on the map), folders (folders, no datasets), all, or some (the datasets something uses)
+  function lakeState(lid) {
+    if (S.linkedOnly.has(lid)) return "linked";            // its own tick in the menu
+    const d = lakeData(lid), shown = d.filter(x => V.vis.has(x.id)).length;
+    if (!shown) return S.folderMode.has(lid) ? "folders" : "collapsed";
+    return lakeOpen(lid) ? "all" : "some";
+  }
+  function menuSub(n) {
+    if (n.kind === "item" && n.type === "Lakehouse") {
+      const d = lakeData(n.id), on = d.filter(x => V.vis.has(x.id)).length;
+      if (!n.external && n.scannable && !S.scans.has(n.itemId)) return "Not read yet: its datasets load when you open it";
+      return `${on} of ${d.length} dataset${d.length === 1 ? "" : "s"} on the map${S.folderMode.has(n.id) ? ", folders shown" : ""}${S.linkedOnly.has(n.id) ? ", linked only" : ""}`;
+    }
+    if (n.kind === "schema") { const ids = folderIds(n.id); return `${ids.filter(id => V.vis.has(id)).length} of ${ids.length} datasets on the map`; }
+    if (n.kind === "heading") { const ids = sectionTables(n.parent, n.sec); return `${ids.filter(t => V.vis.has(t.id)).length} of ${ids.length} datasets on the map`; }
+    return "";
+  }
+  // The tables a right-click works on for columns: the table itself, a folder's or a lakehouse's tables on
+  // the map, the lakehouses of a group, or all of that for a selection. Only tables whose columns can be read.
+  // The tables a right-click works on for columns: the table itself, a folder's (node or heading) or a
+  // lakehouse's tables, the lakehouses of a group, or all of that for a selection. "show" holds the ones on
+  // the map; "hide" every one with columns on, also tables collapsed away under a folder.
+  const sectionTables = (lid, sec) => lakeData(lid).filter(t => secKeyOf(t) === sec);
+  function colTargets(n, many) {
+    const show = new Set(), hide = new Set();
+    const table = t => { if (!t || t.kind !== "table" || !colKey(t)) return; if (V.vis.has(t.id)) show.add(t.id); if (S.colsOnMap.has(t.id)) hide.add(t.id); };
+    const add = m => {
+      if (!m) return;
+      if (m.kind === "table") table(m);
+      else if (m.kind === "schema" || m.kind === "heading") for (const t of sectionTables(m.parent, m.sec)) table(t);
+      else if ((m.kind === "item" && m.type === "Lakehouse") || m.kind === "external" || m.external) for (const t of lakeData(m.id)) table(t);
+      else if (m.kind === "group") for (const id of m.members) { const x = S.nodes.get(id); if (x && x.type === "Lakehouse") add(x); }
+    };
+    if (many) for (const id of S.multi) add(S.nodes.get(id)); else add(n);
+    return {show: [...show], hide: [...hide]};
+  }
+  // A folder heading in a lakehouse column (shown when Folders is off): right-clicking it works like a folder
+  function hitHeading(p) {
+    if (S.layout !== "struct" || S.view.k < 0.42) return null;
+    for (const lane of LANES) for (const sc of lane.sections) {
+      const f = !sc.node && sc.first && S.nodes.get(sc.first);
+      if (!f || !V.vis.has(f.id)) continue;
+      const top = f.y - f.h / 2;
+      if (p.x >= f.x - f.w / 2 && p.x <= f.x + f.w / 2 && p.y >= top - 19 && p.y <= top - 1) {
+        const lh = S.nodes.get(lane.id), sec = sc.label === "Files" ? "files" : "t:" + sc.label;
+        return {id: `heading:${lane.id}|${sec}`, kind: "heading", label: sc.label, parent: lane.id, sec, fullName: `${lh ? lh.label : ""} · ${sc.label}`};
+      }
+    }
+    return null;
+  }
   function removeFromView(ids) {
     for (const id of ids) {
       const n = S.nodes.get(id);
@@ -2708,8 +3025,9 @@
   function openMenu(n, x, y) {
     const items = menuItems(n);
     menu._items = items;
-    menu.innerHTML = `<div class="ctx-title">${esc(n.fullName || n.label)}</div>` +
-      items.map((it, i) => it.sep ? '<hr class="ctx-sep">' : `<button role="${it.on === undefined ? "menuitem" : "menuitemradio"}" ${it.on !== undefined ? `aria-checked="${it.on}"` : ""} data-mi="${i}"><span class="ctx-check">${it.on ? "\u2713" : ""}</span>${esc(it.label)}</button>`).join("");
+    const sub = menuSub(n);
+    menu.innerHTML = `<div class="ctx-title">${esc(n.fullName || n.label)}${sub ? `<small>${esc(sub)}</small>` : ""}</div>` +
+      items.map((it, i) => it.sep ? '<hr class="ctx-sep">' : `<button role="${it.check ? "menuitemcheckbox" : it.on === undefined ? "menuitem" : "menuitemradio"}" ${it.on !== undefined ? `aria-checked="${it.on}"` : ""} data-mi="${i}"><span class="ctx-check">${it.on ? "\u2713" : ""}</span>${esc(it.label)}</button>`).join("");
     menu.hidden = false;
     const r = $("#stage").getBoundingClientRect();
     menu.style.left = `${Math.max(4, Math.min(x - r.left, r.width - menu.offsetWidth - 6))}px`;
@@ -2765,7 +3083,7 @@
     $("#focusBtn").onclick = () => { if (S.focusMode) leaveFocus(); else enterFocus(); };
     $("#focusLeave").onclick = () => leaveFocus();
     $("#pinOff").onclick = () => unpinHighlight();
-    $("#relayout").onclick = () => { if (S.layout === "struct") { S.offsets.clear(); S.focusIds = null; S.focusSig = ""; layoutStructured(true); return; } for (const n of S.nodes.values()) n.fixed = false; reheat(1); };
+    $("#relayout").onclick = () => { if (S.layout === "struct") { S.offsets.clear(); S.rowOrder.clear(); S.secOrder.clear(); S.focusIds = null; S.focusSig = ""; layoutStructured(true); return; } for (const n of S.nodes.values()) n.fixed = false; reheat(1); };
     for (const b of document.querySelectorAll("[data-layout]")) b.onclick = () => setLayout(b.dataset.layout);
     markLayout();
     $("#viewBtn").onclick = () => togglePop("#viewBtn", "#viewMenu");
@@ -2775,7 +3093,7 @@
     for (const box of document.querySelectorAll("[data-opt]")) { box.checked = !!S.opts[box.dataset.opt]; box.onchange = () => setOpt(box.dataset.opt, box.checked); }
     for (const b of document.querySelectorAll("[data-hl]")) {
       b.setAttribute("aria-pressed", String(b.dataset.hl === S.hl));
-      b.onclick = () => { S.hl = b.dataset.hl; store.set("hl", S.hl); for (const o of document.querySelectorAll("[data-hl]")) o.setAttribute("aria-pressed", String(o === b)); computeActive(); renderDetails(); requestDraw(); refocus(); };
+      b.onclick = () => { S.hl = b.dataset.hl; store.set("hl", S.hl); for (const o of document.querySelectorAll("[data-hl]")) o.setAttribute("aria-pressed", String(o === b)); if (S.focusMode) refreshFocus(); computeActive(); renderDetails(); requestDraw(); refocus(); };
     }
     for (const b of document.querySelectorAll("[data-group]")) {
       b.setAttribute("aria-pressed", String(b.dataset.group === S.groupMode));
@@ -2827,6 +3145,7 @@
     $("#detailsBody").addEventListener("change", ev => {
       const v = ev.target.closest("[data-vis]");
       if (v) { setNodeOnMap(v.dataset.vis, v.checked); return; }
+      if (ev.target.matches("[data-linkedonly]")) { setLinkedOnly(ev.target.dataset.linkedonly, ev.target.checked); return; }
       if (ev.target.matches("[data-modelonly]")) { S.modelColsVisibleOnly = ev.target.checked; store.set("modelColsVisibleOnly", ev.target.checked); renderDetails(); return; }
       const sv = ev.target.closest("[data-ddsecvis]");
       if (sv) setDataOnMap(S.ddSecIds.get(sv.dataset.ddsecvis) || [], sv.checked);
@@ -2867,7 +3186,14 @@
       const th = ev.target.closest("[data-thread]");
       if (th) { setThreadDir(th.dataset.thread); return; }
       const cm = ev.target.closest("[data-colsmap]");
-      if (cm) { setColsOnMap(cm.dataset.model ? modelSourceTables(cm.dataset.model) : [S.sel], cm.dataset.colsmap); return; }
+      if (cm) {
+        const sc = cm.dataset.scope || "";
+        const ids = sc.startsWith("model:") ? modelSourceTables(sc.slice(6))
+          : sc.startsWith("lake:") ? lakeData(sc.slice(5)).filter(t => t.kind === "table" && V.vis.has(t.id)).map(t => t.id) : [S.sel];
+        setColsOnMap(ids, cm.dataset.colsmap); return;
+      }
+      const lf = ev.target.closest("[data-lakefold]");
+      if (lf) { setFolders(lf.dataset.id, lf.dataset.lakefold === "on"); return; }
       const mc = ev.target.closest("[data-mcols]");
       if (mc) { S.modelColsOpen.set(mc.dataset.mcols, mc.getAttribute("aria-expanded") !== "true"); renderDetails(); return; }
       const dd = ev.target.closest("[data-dd]");
@@ -2968,6 +3294,14 @@
     $("#theme").addEventListener("click", () => store.set("themeChosen", true));
   }
 
+  // the hint and the bars sit just under the map's toolbar, however many rows it wraps onto
+  function trackToolbar() {
+    const bar = $("#tools"), stage = $("#stage");
+    if (!bar || !stage) return;
+    const place = () => stage.style.setProperty("--below-tools", `${Math.round(bar.offsetTop + bar.offsetHeight + 6)}px`);
+    place();
+    if (window.ResizeObserver) new ResizeObserver(place).observe(bar);
+  }
   function initResizer() {
     const r = $("#resizeLeft");
     if (!r) return;
@@ -2986,7 +3320,7 @@
   async function boot() {
     readColors();
     applyTheme(store.get("theme", matchMedia("(prefers-color-scheme: dark)").matches ? "blueprint" : "sheet"));
-    bind(); buildLegend(); initResizer(); resize();
+    bind(); buildLegend(); initResizer(); trackToolbar(); resize();
     if (!KEY) { showEmpty("nokey"); return; }
     try { S.hello = await api("/api/hello"); }
     catch (err) { showEmpty("error", err); return; }
@@ -2996,7 +3330,7 @@
     else showEmpty("start");
     refreshLog();
   }
-  window.fabricExplorer = {S, get V() { return V; }, refreshItems, setColsOnMap, modelUse, pinHighlight, unpinHighlight, revealLineage, unload, toggleOf, expandLake, collapseLake, enterFocus, leaveFocus, setThreadDir, select, selectMany, clearSelection, reveal, setFolders, cascadeLake, setNodeOnMap, openLink, fit, setContents, setLayout, setDataOnMap, get LANES() { return LANES; }, setItemOnMap, setGroupOnMap, showAllItems, showColumns, setLeftTab,
+  window.fabricExplorer = {S, get V() { return V; }, colTargets, setLinkedOnly, refreshFocus, keepApart, refreshItems, setColsOnMap, modelUse, pinHighlight, unpinHighlight, revealLineage, unload, toggleOf, expandLake, collapseLake, enterFocus, leaveFocus, setThreadDir, select, selectMany, clearSelection, reveal, setFolders, cascadeLake, setNodeOnMap, openLink, fit, setContents, setLayout, setDataOnMap, get LANES() { return LANES; }, setItemOnMap, setGroupOnMap, showAllItems, showColumns, setLeftTab,
     readType(type) { readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.type === type && n.scannable).map(n => n.itemId)); }, screenOf(id) { const n = S.nodes.get(id); return n ? {x: n.x * S.view.k + S.view.x, y: n.y * S.view.k + S.view.y} : null; }};
   boot();
 })();

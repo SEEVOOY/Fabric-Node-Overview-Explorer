@@ -88,7 +88,7 @@
 
   <section class="stage" id="stage">
     <canvas id="sheet" tabindex="0" aria-label="Map of the workspace. Select an item to read its content and draw its links."></canvas>
-    <div class="tools">
+    <div class="tools" id="tools">
       <button id="fit" class="tool" title="Fit the map to the window (F)">Fit</button>
       <div class="seg" role="group" aria-label="Arrangement">
         <button data-layout="free" aria-pressed="true" title="Items find their place by their links; you can drag them">Free</button>
@@ -103,11 +103,13 @@
           <label><input type="checkbox" data-opt="structure" checked> Workspace groups</label>
           <label><input type="checkbox" data-opt="settings" checked> Default lakehouse links</label>
           <label><input type="checkbox" data-opt="flow" checked> Arrange data flow left to right</label>
+          <label title="Structured view: items snap into line while you drag them, and nothing can overlap"><input type="checkbox" data-opt="snap" checked> Snap and keep items apart</label>
         </div>
       </div>
       <div class="seg" role="group" aria-label="When you select something, highlight">
         <button data-hl="full" aria-pressed="true" title="Everything upstream and downstream">Full lineage</button>
         <button data-hl="direct" aria-pressed="false" title="Only what is linked directly">Direct links</button>
+        <button data-hl="none" aria-pressed="false" title="Clicking an item only selects it: nothing else is highlighted and the map stays as it is">Selected only</button>
       </div>
       <button id="focusBtn" class="tool" aria-pressed="false" title="Show only what is highlighted; click again to bring the rest back. Your tickboxes don't change.">Focus</button>
       <div class="menu">

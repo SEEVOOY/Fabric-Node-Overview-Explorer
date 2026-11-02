@@ -442,7 +442,7 @@ body.no-left .tree, body.no-right .details { visibility: hidden; }
 .ref-line .vis, .tbl .vis { margin-right: 4px; }
 
 /* one line under the map's toolbar saying what dragging does in this view */
-.map-hint { position: absolute; top: 46px; left: 12px; z-index: 2; max-width: calc(100% - 24px); padding: 2px 6px;
+.map-hint { position: absolute; top: var(--below-tools, 46px); left: 12px; z-index: 2; max-width: calc(100% - 24px); padding: 2px 6px;
   border-radius: 3px; font-size: 11.5px; color: var(--c-ink2); background: color-mix(in srgb, var(--c-sheet) 85%, transparent);
   pointer-events: none; }
 
@@ -515,7 +515,7 @@ body.no-left .tree, body.no-right .details { visibility: hidden; }
 .ctx-menu button { display: flex; align-items: center; gap: 2px; }
 .ctx-check { display: inline-block; width: 16px; flex: none; color: var(--c-read); font-weight: 700; }
 /* focus mode: a bar on the map while only the highlighted items are shown */
-.map-bars { position: absolute; top: 46px; left: 12px; z-index: 3; display: grid; gap: 6px; justify-items: start; max-width: calc(100% - 24px); }
+.map-bars { position: absolute; top: var(--below-tools, 46px); left: 12px; z-index: 3; display: grid; gap: 6px; justify-items: start; max-width: calc(100% - 24px); }
 .focus-bar { display: flex; align-items: center; gap: 10px; max-width: 100%;
   padding: 4px 4px 4px 12px; border-radius: 6px; background: var(--c-ink); color: var(--c-sheet); font-size: 12.5px; }
 .focus-bar button { height: 26px; padding: 0 10px; border: 0; border-radius: 4px; background: var(--c-sheet); color: var(--c-ink);
@@ -552,3 +552,4 @@ svg.pin { width: 13px; height: 13px; flex: none; color: var(--c-ink); margin-lef
 /* Table content tab: columns a model uses */
 .cols li.in-model { font-weight: 600; }
 .cols .cm { margin-left: 6px; padding: 0 5px; border-radius: 7px; background: var(--c-serve); color: var(--c-sheet); font: 600 10px var(--font-ui); }
+.ctx-title small { display: block; margin-top: 2px; font-weight: 400; font-size: 11.5px; color: var(--c-muted); }

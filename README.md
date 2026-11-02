@@ -68,7 +68,11 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
 - **Open in Fabric.** Ctrl+click an item, click the arrow at its corner, use *Open in Fabric* in
   the details panel, or the arrow next to it in the list.
 - **Lineage.** Selecting something highlights everything upstream and downstream of it
-  (*Full lineage*), or only what is directly linked (*Direct links*). In the details panel, every
+  (*Full lineage*), or only what is directly linked (*Direct links*). *Selected only* turns this
+  off: clicking an item just selects it (its details show on the right) and nothing else is
+  highlighted, dimmed or rearranged, which makes moving items around easier. Asking for a lineage
+  on purpose (right-click *Show its lineage* or a thread, *Show all its relations*, *Pin its
+  highlight*) switches back to *Full lineage* so it can be seen. The choice is remembered. In the details panel, every
   name that is highlighted on the map is one size larger, bold and italic, and *Highlighted on the
   map* at the bottom lists the whole highlighted chain. Hovering a row in the panel rings that item
   on the map; hovering an item on the map tints its row in the panel.
@@ -104,8 +108,15 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   hasn't been). **−** collapses it again: its folders and datasets leave the map and notebook links
   point at the lakehouse itself. Folder nodes have their own **+ / −** to open or close one folder at
   a time. A lakehouse with more than 300 tables and folders asks first; answering no shows just its
-  folders, each with its own **+**. Right-click a lakehouse for *Expand*, *Show its folders only* and
-  *Collapse*. The left panel's tickboxes keep working alongside and follow what you do here.
+  folders, each with its own **+**. Right-click a lakehouse to choose how much of it is open:
+  *Collapsed: just the lakehouse*, *Folders only, each collapsed* (its datasets leave the map and
+  links to them point at their folder; **+** on a folder opens it) or *Folders and all datasets*;
+  the current choice is ticked, and a line under its name says how many of its datasets are on
+  the map. *Linked tables only* (in the same menu, or a tickbox in the lakehouse's details) leaves
+  out its datasets that have no line to anything on the map, and folders with nothing linked in
+  them; it follows the map as you read or tick items, works in focus mode too, and choosing one of
+  the three above switches it off. The left panel's tickboxes keep working alongside and follow
+  what you do here.
 - **A semantic model's columns.** Selecting a semantic model lists its tables in the details panel;
   each opens onto the columns of its source table, marked *in the model*, *hidden in the model*
   (italic), *not in the model* (grey), *in the model as …* for renamed ones, plus the model's
@@ -116,6 +127,12 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   uses have a green dot and bold text, and the ones it hides are in italics. *In use* shows only the
   columns a semantic model shows, leaving out the ones it hides. A model's details have the same switch
   for all of its tables at once. Very long tables show the first 40 and point to the Table content tab.
+  Right-click a table, a folder, a lakehouse or a group of lakehouses (or a selection of several of
+  them) for *Show columns*, *Show columns in use* and *Hide columns*; for a folder, lakehouse or group
+  *Show* works on its tables that are on the map and *Hide* on every one of its tables that has
+  columns on (also ones collapsed away), and the menu says how many. With *Folders* off, a
+  lakehouse's folders are headings in its column (*Tables*, *Files*, or the schema names): those can
+  be right-clicked too, for the same column choices and *Expand* / *Collapse* of their datasets.
 - **Folders (schemas) on the map.** The *Folders* tickbox beside a lakehouse (its column is
   labelled in the group heading, next to *Contents*) shows its schemas, or Tables, and Files as
   nodes on the map, with the datasets on the map hanging under their folder: bronze, then d2_temp,
@@ -161,14 +178,17 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   context; further along only the chosen direction is followed, so the thread stays readable. With
   *Direct links* only the notebooks right next to it are lit.
 - **Focus mode** (*Focus* above the map, *Focus* in a table's details, or right-click *Focus on
-  what's highlighted*) shows only what is highlighted, without changing any tickbox. Inside it you
-  can click and explore freely: the map doesn't grow beyond the focus, and anything you tick is
-  added to it. *Leave focus* (or Esc with nothing selected) brings everything back as it was.
+  what's highlighted*) shows only the lineage of the selected (or pinned) item, also the parts you
+  had unticked, without changing any tickbox. Switching *Direct links* / *Full lineage*, or a
+  dataset's *Follow* direction, works the focus out again; the bar above the map says what it is
+  focused on. Inside it you can click and explore freely: the map doesn't grow beyond the focus,
+  ticking an item adds it and unticking takes it out. *Leave focus* (or Esc with nothing selected)
+  brings everything back as it was.
 - **Right-click an item on the map** for a menu: the thread options for tables and folders,
   *Focus on what's highlighted*, *Remove from view* (with several selected and the item among
   them, it removes them all) and *Open in Fabric*. Right-drag still pans.
-- **Free or Structured** (top of the map). *Free* is the map described above: items find their
-  place by their links, and you can drag them. *Structured* arranges the same nodes tidily by
+- **Structured or Free** (top of the map). The app opens in *Structured*. *Free* is the map
+  described above: items find their place by their links, and you can drag them. *Structured* arranges the same nodes tidily by
   hierarchy: every lakehouse becomes a column with its schemas (or Tables) and Files listed under
   it, the columns follow the data flow from sources to gold, and notebooks sit in the gaps between
   the lakehouses they read and write, ordered so links cross as little as possible. Orchestrating
@@ -180,15 +200,27 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   the same in both; switching back to Free puts the items where they were.
 - **Moving and selecting several.** In both views, dragging on empty space pans the map and
   dragging an item moves it; in the Structured view, dragging a lakehouse moves its whole column
-  with its tables. Hold Shift and drag on empty space to draw a selection box (the cursor turns into
+  with its tables, and everything inside a lakehouse stays inside it: dragging a dataset moves it up
+  or down within its folder (a blue line shows where it will go, and the others make room when you
+  let go), and dragging a folder moves it, with its datasets, among the lakehouse's folders. Your
+  order is kept; *Re-layout* goes back to name order. Hold Shift and drag on empty space to draw a selection box (the cursor turns into
   a crosshair): everything inside is selected, and dragging any selected item moves them all
   together. Ctrl+Shift+drag adds another box to the selection, Shift+click adds or removes a single
   item, Esc or a click on empty space clears it. In the Structured view your moves are kept when the
   map changes (new reads, tickboxes); *Re-layout* puts everything back in the tidy arrangement.
-  The right or middle mouse button, or Space+drag, also pans. With several selected, the details panel lists them with *Zoom to them*,
-  *Show only these*, *Take off the map* and *Read the ones not read yet*.
-- **View** (top of the map) switches tables, lakehouse areas, groups, default-lakehouse lines and
-  the left-to-right arrangement on and off. **Export** saves the relationships as a CSV for Excel,
+  While you drag in the Structured view, an item snaps into line with a nearby one (centres or
+  edges within a few pixels; dashed guide lines show it; hold Alt to place it freely), and nothing
+  can end up on top of something else: an item dropped onto another is nudged to the nearest free
+  spot, and this is kept after every change to the map. *Snap and keep items apart* in *View* turns
+  both off. The right or middle mouse button, or Space+drag, also pans. With several selected, the
+  details panel lists them with *Zoom to them*, *Focus on the highlighted*, *Take off the map* and
+  *Read the ones not read yet*.
+- **A lakehouse's details** have *Folders on the map: Show all / Hide all* (all its schemas and
+  folders at once) and *Columns of its tables on the map: Off / All / In use* (for its tables that
+  are on the map). Clicking a table or folder name in any list takes the map to it: it is centred
+  and pulses briefly.
+- **View** (top of the map) switches tables, lakehouse areas, groups, default-lakehouse lines,
+  the left-to-right arrangement, and snapping / keeping items apart on and off. **Export** saves the relationships as a CSV for Excel,
   or the whole map as JSON.
 - **Requests to Fabric** (bottom bar) lists every API call the app made, so you can see that
   opening a workspace is cheap and an item is only fetched when you select it.
