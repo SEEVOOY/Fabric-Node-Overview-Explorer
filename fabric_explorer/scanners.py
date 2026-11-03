@@ -176,7 +176,7 @@ def scan_notebook(ctx: ScanContext) -> dict:
             p = ref.parts
             wh = r.find(p[0], ("Warehouse", "Lakehouse", "SQLEndpoint")) if len(p) >= 2 else None
             parent = r.item_node(g, wh) if wh else r.missing_node(g, "Warehouse", p[0], "No warehouse with this name.")
-            node = r.table_node(g, parent, wh if wh and wh["type"] == "Lakehouse" else None,
+            node = r.table_node(g, parent, wh if wh and wh["type"] in ("Lakehouse", "Warehouse") else None,
                                 p[-2] if len(p) >= 3 else None, p[-1])
         elif ref.kind == "notebook":
             name = _leaf(ref.target)
@@ -323,6 +323,24 @@ def scan_lakehouse(ctx: ScanContext) -> dict:
                                         "status": sql.get("provisioningStatus", "")},
                         "oneLakeTablesPath": props.get("oneLakeTablesPath", ""),
                         "oneLakeFilesPath": props.get("oneLakeFilesPath", "")}}
+
+
+# ---------------------------------------------------------------------- warehouse
+def scan_warehouse(ctx: ScanContext) -> dict:
+    """A warehouse's tables, by schema. Warehouses keep their tables in OneLake as Delta tables
+    (Tables/<schema>/<table>), so they are listed there, and their columns read like a lakehouse's."""
+    it, r, g = ctx.item, ctx.r, Graph()
+    me = r.item_node(g, it)
+    tables, via, notes = _list_tables(ctx, True)
+    table_ids = [r.table_node(g, me, it, schema, name, listed=True, extra={"format": "Delta"}) for schema, name, _, _ in tables]
+    schemas = sorted({t[0] for t in tables if t[0]})
+    if not tables and not notes:
+        notes.append("No tables found in its Tables folder in OneLake.")
+    nodes, edges = g.to_json()
+    summary = f"{_plural(len(table_ids), 'table')}" + (f" in {_plural(len(schemas), 'schema')}" if schemas else "") + "."
+    return {"summary": summary, "nodes": nodes, "edges": edges, "unresolved": [],
+            "details": {"schemas": True, "defaultSchema": "dbo", "tables": table_ids, "tablesVia": via, "notes": notes,
+                        "folders": [], "shortcuts": []}}
 
 
 # ---------------------------------------------------------------------- semantic model
@@ -590,14 +608,14 @@ def explain_columns(e: Exception) -> str:
         if e.status in (401, 403):
             return "Your account can't read this table in OneLake (workspace role or OneLake security)."
         if e.status == 404 or "notfound" in (e.code or "").lower():
-            return ("The table wasn't found in the lakehouse. The code may create it at run time, or the name in "
+            return ("The table wasn't found in its lakehouse or warehouse. The code may create it at run time, or the name in "
                     "the code may differ from the table's.")
         if e.code == "NoSchema":
             return "Open the table in Fabric to see its columns."
     return explain(e)
 
 
-SCANNERS = {"Notebook": scan_notebook, "Lakehouse": scan_lakehouse, "SemanticModel": scan_semantic_model,
+SCANNERS = {"Notebook": scan_notebook, "Lakehouse": scan_lakehouse, "Warehouse": scan_warehouse, "SemanticModel": scan_semantic_model,
             "Report": scan_report, "DataPipeline": scan_pipeline, "SQLEndpoint": scan_sql_endpoint}
 
 

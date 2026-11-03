@@ -61,6 +61,7 @@ TABLES = {
     "gold": ["fact_pims_tags", "dim_documents", "bridge_documents_tags", "kpi_tags_by_domain"],
 }
 SCHEMA_TABLES = {"dbo": ["project_master"], "ism": ["pro_nomenclature", "discipline_codes"]}
+WH_TABLES = {"dbo": ["rpt_tags_by_plant", "rpt_documents_status"], "staging": ["stg_tags"]}     # wh_reporting
 FILES = {"bronze": ["raw", "archive"], "gold": ["exports", "external"], "lh_reference": ["reference_docs"]}
 
 _TAG = ["PrimKey", "TagNo", "Description", "Domain", "Plant", "Project", "System", "SubSystem", "TagCategory",
@@ -69,6 +70,9 @@ _DOC = ["DocumentID", "DocumentNo", "Title", "Discipline", "DocumentType", "Revi
         "Plant", "Project"]
 _LINK = ["tag_no", "document_id", "Plant", "Project"]
 COLUMNS = {
+    "rpt_tags_by_plant": ["Plant", "Domain", "tags", "loaded_at"],
+    "rpt_documents_status": ["Status", "Discipline", "documents", "loaded_at"],
+    "stg_tags": ["TagNo", "Plant", "Domain", "Description", "loaded_at"],
     "cms_tags_raw": _TAG + ["ingested_at"], "old_tags_backup": _TAG, "cms_tags_current": _TAG,
     "cms_tags_history": _TAG + ["loaded_at"], "dcs_documents_raw": _DOC, "dcs_documents": _DOC + ["DisciplineName"],
     "cms_documents_tags_raw": _LINK, "cms_documents_tags": _LINK, "bridge_documents_tags": _LINK,
@@ -77,7 +81,7 @@ COLUMNS = {
     "project_master": ["Project", "ProjectName", "Plant", "Operator"], "ref_disciplines": ["Code", "Discipline"],
     "plants": ["PlantCode", "PlantName", "Country"],
 }
-LOG_ONLY = {"kpi_tags_by_domain"}        # the table API doesn't answer for this one: read from its Delta log
+LOG_ONLY = {"kpi_tags_by_domain", "rpt_tags_by_plant", "rpt_documents_status", "stg_tags"}   # read from their Delta logs
 
 
 def _col_type(name: str) -> str:
@@ -152,7 +156,10 @@ NOTEBOOKS = {
         'links = spark.sql("SELECT * FROM silver.cms_documents_tags")\n'
         'links.write.mode("overwrite").saveAsTable("gold.bridge_documents_tags")\n'
         'export = spark.table("gold.fact_pims_tags").toPandas()\n'
-        'export.to_parquet("/lakehouse/default/Files/exports/fact_pims_tags.parquet")')),
+        'export.to_parquet("/lakehouse/default/Files/exports/fact_pims_tags.parquet")',
+        'import com.microsoft.spark.fabric\n'
+        'by_plant = spark.table("gold.fact_pims_tags").groupBy("Plant", "Domain").count().withColumnRenamed("count", "tags")\n'
+        'by_plant.write.mode("overwrite").synapsesql("wh_reporting.dbo.rpt_tags_by_plant")')),
     "nb40": dict(lakehouse="silver", cells=_cells(
         'dag = {\n    "activities": [\n'
         '        {"name": "tags", "path": "nb_20_bronze_to_silver_tags", "timeoutPerCellInSeconds": 600},\n'
@@ -419,12 +426,17 @@ class DemoHttp:
             if directory.endswith("/Files"):
                 return FakeResponse(200, {"paths": []})
             for t in LOG_ONLY:
-                if directory.endswith(f"/Tables/{t}/_delta_log"):
+                if directory.endswith(f"/{t}/_delta_log"):                # Tables/<table> or Tables/<schema>/<table>
                     return FakeResponse(200, {"paths": [{"name": f"{directory}/{i:020d}.json", "contentLength": "900"}
                                                         for i in range(2)] + [{"name": f"{directory}/_last_checkpoint"}]})
             if p.path.strip("/") == WS and directory == f"{ID['lh_reference']}/Tables":
                 return FakeResponse(200, {"paths": [{"name": f"{ID['lh_reference']}/Tables/{s}", "isDirectory": "true"}
                                                     for s in SCHEMA_TABLES]})
+            if p.path.strip("/") == WS and directory == f"{ID['wh']}/Tables":
+                return FakeResponse(200, {"paths": [{"name": f"{ID['wh']}/Tables/{s}", "isDirectory": "true"} for s in WH_TABLES]})
+            for schema, tables in WH_TABLES.items():
+                if directory == f"{ID['wh']}/Tables/{schema}":
+                    return FakeResponse(200, {"paths": [{"name": f"{directory}/{t}", "isDirectory": "true"} for t in tables]})
             for schema, tables in SCHEMA_TABLES.items():
                 if directory == f"{ID['lh_reference']}/Tables/{schema}":
                     return FakeResponse(200, {"paths": [{"name": f"{directory}/{t}", "isDirectory": "true"}

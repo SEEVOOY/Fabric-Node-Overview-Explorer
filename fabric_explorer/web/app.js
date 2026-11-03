@@ -116,7 +116,7 @@
     return (n.color = PALETTE[hash(n.id) % PALETTE.length]);
   }
   const colorOf = n => (n.kind === "table" || n.kind === "file") ? lakeColor(S.nodes.get(n.parent)) :
-    (n.type === "Lakehouse" ? lakeColor(n) : ({DataPipeline: C.run, SemanticModel: C.serve, Report: C.serve}[n.type] || C.ink2));
+    (holdsData(n.type) ? lakeColor(n) : ({DataPipeline: C.run, SemanticModel: C.serve, Report: C.serve}[n.type] || C.ink2));
 
   // ============================================================ workspace and links
   async function openWorkspace(id, itemId = "", refresh = false) {
@@ -270,7 +270,7 @@
     const added = new Set();
     for (const id of ids) {
       const nid = "item:" + id, n = S.nodes.get(nid);
-      if (n && n.type === "Lakehouse") {
+      if (n && holdsData(n.type)) {
         if (keep) for (const t of lakeData(nid)) { const k = colKey(t); if (k) { S.colCache.delete(k); S.colStale.add(k); } }
         else { resetLake(nid); S.treeDD.delete(nid); for (const k of [...S.ddOpen]) if (k.endsWith("|" + nid)) S.ddOpen.delete(k); }
       }
@@ -308,6 +308,8 @@
     return false;
   }
   const isTable = n => !!n && (n.kind === "table" || n.kind === "file");
+  // items that hold datasets (tables under schemas, folders) and get the lakehouse features
+  const holdsData = t => t === "Lakehouse" || t === "Warehouse";
   // the folder a table or Files folder sits in: "t:<schema>", "t:Tables" (no schemas) or "files"
   const secKeyOf = t => t.kind === "file" ? "files" : "t:" + (t.schema || "Tables");
   const folderId = (lid, key) => `fold:${lid}|${key}`;
@@ -951,7 +953,7 @@
       }
     }
     else if (n.kind === "item" && n.type === "Lakehouse") { n.h = 44; n.w = clamp(measure(n.label, F.lake()) + 70, 150, 290); }
-    else { n.h = twoLine(n) ? 40 : 34; n.w = clamp(Math.max(measure(n.label, F.item()), twoLine(n) ? measure(subLine(n), F.tiny()) : 0) + 46, 120, 260); }
+    else { n.h = twoLine(n) ? 40 : 34; n.w = clamp(Math.max(measure(n.label, F.item()), twoLine(n) ? measure(subLine(n), F.tiny()) : 0) + (n.type === "Warehouse" ? 66 : 46), 120, 280); }
   }
   const twoLine = n => !!(n.external || n.kind === "external" || n.kind === "missing");
   const subLine = n => n.external ? `in ${n.workspaceName || "another workspace"}` : n.kind === "missing" ? "not found" : "outside Fabric";
@@ -1030,7 +1032,7 @@
     ctx.font = `600 ${size}px ${FONT}`; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
     ctx.lineJoin = "round"; ctx.lineWidth = 4 / k; ctx.strokeStyle = C.sheet;
     const want = n => n.id === S.hover || n.id === S.sel || (act ? act.has(n.id) && n.kind !== "group" :
-      n.kind === "group" || n.kind === "schema" || (n.kind === "item" && n.type === "Lakehouse") || n.kind === "missing");
+      n.kind === "group" || n.kind === "schema" || (n.kind === "item" && holdsData(n.type)) || n.kind === "missing");
     const list = V.nodes.filter(want).sort((a, b) => (b.id === S.sel) - (a.id === S.sel) || (a.kind === "table") - (b.kind === "table"));
     for (const n of list) {
       const text = n.kind === "group" ? `${n.label} ${n.members.length}` : n.label;
@@ -1245,11 +1247,13 @@
       const gtype = n.kind === "external" ? "External" : n.type;
       glyph(gtype, x + 15, n.y, n.kind === "missing" ? C.error : colorOf(n));
       ctx.font = F.item(); ctx.fillStyle = st === "na" ? C.ink2 : C.ink; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      const room = n.type === "Warehouse" ? 58 : 38;             // a warehouse keeps room for its + / −
       if (k < 0.42) { /* the far label carries the name */ } else if (twoLine(n)) {
-        ctx.fillText(fitText(n.label, n.w - 38, F.item()), x + 28, n.y - 6);
+        ctx.fillText(fitText(n.label, n.w - room, F.item()), x + 28, n.y - 6);
         ctx.font = F.tiny(); ctx.fillStyle = n.kind === "missing" ? C.error : C.muted;
-        ctx.fillText(fitText(subLine(n), n.w - 38, F.tiny()), x + 28, n.y + 8);
-      } else ctx.fillText(fitText(n.label, n.w - 38, F.item()), x + 28, n.y + 0.5);
+        ctx.fillText(fitText(subLine(n), n.w - room, F.tiny()), x + 28, n.y + 8);
+      } else ctx.fillText(fitText(n.label, n.w - room, F.item()), x + 28, n.y + 0.5);
+      if (n.kind === "item" && n.type === "Warehouse") drawToggle(n);
       if (st === "err") {
         ctx.beginPath(); ctx.arc(x + n.w - 2, y + 2, 7, 0, 7); ctx.fillStyle = C.error; ctx.fill();
         ctx.fillStyle = C.card; ctx.font = `700 10px ${FONT}`; ctx.textAlign = "center"; ctx.fillText("!", x + n.w - 2, y + 2.5);
@@ -1366,7 +1370,7 @@
         if (!V.vis.has(id)) continue;
         start.push(id);
         const n = S.nodes.get(id);
-        if (n && ((n.kind === "item" && n.type === "Lakehouse") || n.kind === "missing" || n.kind === "external" || n.external))
+        if (n && ((n.kind === "item" && holdsData(n.type)) || n.kind === "missing" || n.kind === "external" || n.external))
           for (const m of V.nodes) if (m.parent === id) start.push(m.id);
       }
       S.active = start.length ? lineage(start, S.hl !== "direct") : null;
@@ -1384,7 +1388,7 @@
     let start = [n.id];
     if (n.kind === "group") start = [n.id, ...n.members.filter(m => V.vis.has(m))];
     else if (n.kind === "schema") start = [n.id, ...V.nodes.filter(m => m.schemaNode === n.id).map(m => m.id)];
-    else if ((n.kind === "item" && n.type === "Lakehouse") || n.kind === "missing" || n.kind === "external" || n.external)
+    else if ((n.kind === "item" && holdsData(n.type)) || n.kind === "missing" || n.kind === "external" || n.external)
       start = [n.id, ...V.nodes.filter(m => m.parent === n.id).map(m => m.id)];
     const a = lineage(start, S.hl !== "direct");
     return a.size <= start.length && n.kind !== "group" ? null : a;   // nothing linked yet: don't dim the map
@@ -1467,7 +1471,7 @@
     if (isTable(n)) return thread(id, S.threadDir, full, G);
     let start = [id];
     if (n.kind === "group") start = [id, ...n.members];
-    else if (n.kind === "item" && n.type === "Lakehouse") start = [id, ...[...S.nodes.values()].filter(m => m.parent === id && isTable(m) && G.adj.has(m.id)).map(m => m.id)];
+    else if (n.kind === "item" && holdsData(n.type)) start = [id, ...[...S.nodes.values()].filter(m => m.parent === id && isTable(m) && G.adj.has(m.id)).map(m => m.id)];
     return lineage(start, full, G);
   }
   // every relation the app knows, also between items that aren't on the map
@@ -1931,7 +1935,7 @@
     if (!n) return;
     if (n.kind === "schema") { S.folderVis.set(id, on); afterVisibility(); }
     else if (isTable(n)) setDataOnMap([id], on);
-    else if (n.kind === "item" && n.type === "Lakehouse" && !n.external) cascadeLake(id, on);
+    else if (n.kind === "item" && holdsData(n.type) && !n.external) cascadeLake(id, on);
     else setItemOnMap(id, on);
   }
   // ---- + / − on the map: a lakehouse opens into its folders and datasets, a folder into its datasets
@@ -2002,6 +2006,7 @@
   function toggleOf(n) {
     if (S.view.k < 0.42 || !V.vis.has(n.id)) return null;
     if (n.kind === "item" && n.type === "Lakehouse") return {x: n.x + n.w / 2 - n.h * 0.21, y: n.y, r: 7.5, open: lakeOpen(n.id)};
+    if (n.kind === "item" && n.type === "Warehouse") return {x: n.x + n.w / 2 - 14, y: n.y, r: 7, open: lakeOpen(n.id)};
     if (n.kind === "schema") return {x: n.x + n.w / 2 - 11, y: n.y, r: 6.5, open: folderOpen(n.id)};
     return null;
   }
@@ -2076,13 +2081,13 @@
     for (const m of g.members) {
       const n = S.nodes.get(m);
       if (!n || (on && n.type === "SQLEndpoint" && S.groupMode !== "folder")) continue;
-      if (on) showWithLakes(m); else { if (n.type === "Lakehouse") resetLake(m); onMap(m, false); }
+      if (on) showWithLakes(m); else { if (holdsData(n.type)) resetLake(m); onMap(m, false); }
     }
     if (on) S.expanded.add(gid); else S.expanded.delete(gid);
     afterVisibility();
   }
   function showAllItems(on) {
-    for (const n of S.nodes.values()) if (n.kind === "item" && !n.external && (!on || n.type !== "SQLEndpoint")) { if (!on && n.type === "Lakehouse") resetLake(n.id); onMap(n.id, on); }
+    for (const n of S.nodes.values()) if (n.kind === "item" && !n.external && (!on || n.type !== "SQLEndpoint")) { if (!on && holdsData(n.type)) resetLake(n.id); onMap(n.id, on); }
     if (!on) {                                   // and everything that was put on the map on its own
       S.expanded.clear();
       for (const n of S.nodes.values()) if (isTable(n) || n.kind === "external" || n.kind === "missing" || n.external) S.shown.delete(n.id);
@@ -2256,12 +2261,12 @@
     const n = S.sel && S.nodes.get(S.sel);
     if (!n) return {title: "", list: []};
     let ids = [];
-    if (n.kind === "item" && n.type === "Lakehouse") { const sc = S.scans.get(n.itemId); ids = (sc && sc.details && sc.details.tables) || childrenOf(n.id); }
+    if (n.kind === "item" && holdsData(n.type)) { const sc = S.scans.get(n.itemId); ids = (sc && sc.details && sc.details.tables) || childrenOf(n.id); }
     else if (n.kind === "schema") ids = [...S.nodes.values()].filter(m => m.schemaNode === n.id).map(m => m.id);
     else if (n.kind === "item") { const r = relations([n.id]); ids = [...(r["in:read"] || new Map()).keys(), ...(r["out:write"] || new Map()).keys(), ...(r["out:maintain"] || new Map()).keys()]; }
     else return {title: "", list: []};
     const list = [...new Set(ids)].map(id => S.nodes.get(id)).filter(m => m && m.kind === "table").sort(byLabel);
-    return {title: n.kind === "item" && n.type !== "Lakehouse" ? `Tables ${n.label} uses` : `Tables in ${n.label}`, list};
+    return {title: n.kind === "item" && !holdsData(n.type) ? `Tables ${n.label} uses` : `Tables in ${n.label}`, list};
   }
   function renderColumns() {
     if (S.leftTab !== "columns") return;
@@ -2326,7 +2331,7 @@
       const readable = all.filter(m => m.scannable), read = readable.filter(m => S.scans.has(m.itemId)).length;
       return `<section class="tg"><div class="tg-head">
         <input type="checkbox" class="vis" data-gvis="${esc(g.id)}" ${all.length && on === all.length ? "checked" : ""} data-mixed="${on > 0 && on < all.length}" title="Put all of them on the map, or take them all off" aria-label="${esc(g.label)} on the map">
-        <button class="tg-toggle" data-tgroup="${esc(g.id)}" aria-expanded="${open}">${CHEV}<span>${esc(g.label)}</span><span class="count">${readable.length && read ? `${read}/` : ""}${all.length}</span></button>${open && all.some(m => m.type === "Lakehouse") ? '<span class="opt-heads" aria-hidden="true"><span class="f">Folders</span><span class="c">Contents</span></span><span class="ext-gap"></span>' : ""}</div>
+        <button class="tg-toggle" data-tgroup="${esc(g.id)}" aria-expanded="${open}">${CHEV}<span>${esc(g.label)}</span><span class="count">${readable.length && read ? `${read}/` : ""}${all.length}</span></button>${open && all.some(m => holdsData(m.type)) ? '<span class="opt-heads" aria-hidden="true"><span class="f">Folders</span><span class="c">Contents</span></span><span class="ext-gap"></span>' : ""}</div>
         ${open ? `<ul>${members.map(itemRow).join("")}</ul>` : ""}
       </section>`;
     }).join("") || '<p class="muted" style="padding:8px">Nothing matches the filter.</p>';
@@ -2342,7 +2347,7 @@
     MLExperiment: "ML experiment", MLModel: "ML model", KQLDatabase: "KQL database", KQLQueryset: "KQL queryset", MirroredDatabase: "Mirrored DB"};
   const shortType = t => SHORT_TYPE[t] || typeName(t);
   function itemRow(m) {
-    const on = V.vis.has(m.id), lake = m.type === "Lakehouse", contents = lake && S.contents.has(m.id), open = lake && S.treeDD.has(m.id);
+    const on = V.vis.has(m.id), lake = holdsData(m.type), contents = lake && S.contents.has(m.id), open = lake && S.treeDD.has(m.id);
     return `<li><div class="it">
       ${lake ? `<button class="tdd" data-tdd="${esc(m.id)}" aria-expanded="${open}" title="${open ? "Hide" : "Show"} its tables and folders here (the map doesn't change)" aria-label="${open ? "Hide" : "Show"} the tables and folders of ${esc(m.label)}">${CHEV}</button>` : '<span class="tdd-gap"></span>'}
       <input type="checkbox" class="vis" data-vis="${esc(m.id)}" ${on ? "checked" : ""} title="On the map" aria-label="${esc(m.label)} on the map">
@@ -2379,7 +2384,7 @@
     let html = S.folderMode.has(lh.id) ? '<li class="sub-note">First box: the folder\'s name on the map. Second box: all its datasets.</li>' : "";
     html += [...bySchema.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, list]) => section("t:" + k, k, list.map(tableRow).join(""), list.length)).join("");
     if (!tables.length) html += '<li class="sub-note">No tables.</li>';
-    html += section("files", "Files", folders.length ? folders.map(folderRow).join("") : '<li class="sub-note">No folders.</li>', folders.length);
+    if (lh.type !== "Warehouse" || folders.length) html += section("files", "Files", folders.length ? folders.map(folderRow).join("") : '<li class="sub-note">No folders.</li>', folders.length);
     return html;
   }
   function fmtTime(iso) { try { return new Date(iso).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); } catch { return ""; } }
@@ -2446,7 +2451,7 @@
   let rowSeq = 0;
   function refRow(id, evidence = [], extra = "", ctx = "") {
     const n = S.nodes.get(id);
-    const lake = !!n && n.kind === "item" && n.type === "Lakehouse", ddKey = `${ctx}|${id}`, ddOpen = lake && S.ddOpen.has(ddKey);
+    const lake = !!n && n.kind === "item" && holdsData(n.type), ddKey = `${ctx}|${id}`, ddOpen = lake && S.ddOpen.has(ddKey);
     const dd = lake ? `<button class="dd" data-dd="${esc(ddKey)}" data-lh="${esc(id)}" aria-expanded="${ddOpen}" title="${ddOpen ? "Hide" : "Show"} its tables and folders" aria-label="${ddOpen ? "Hide" : "Show"} the tables and folders of ${esc(n.label)}">${CHEV}</button>` : "";
     const label = n ? (n.kind === "table" || n.kind === "file" ? n.label : n.label) : id;
     let chip = "";
@@ -2506,7 +2511,7 @@
       if (S.scans.has(n.itemId)) bits.push(`<button class="btn" data-act="unload" data-item="${esc(n.itemId)}" ${busy ? "disabled" : ""} title="Forget what was read: it goes back to not read and its links leave the map. Selecting it reads it again.">Unload</button>`);
     }
     if (n.kind === "table") bits.push(`<button class="btn" data-act="columns" data-id="${esc(n.id)}" title="Show its column names in the Table content tab">Show columns</button>`);
-    if (n.kind === "item" && n.type === "Lakehouse" && !n.external) bits.push(`<button class="btn" data-act="contents" data-id="${esc(n.id)}" title="Its schemas, folders and tables, on the map and in the left panel">${S.contents.has(n.id) ? "Hide its contents" : "Show its contents"}</button>`);
+    if (n.kind === "item" && holdsData(n.type) && !n.external) bits.push(`<button class="btn" data-act="contents" data-id="${esc(n.id)}" title="Its schemas, folders and tables, on the map and in the left panel">${S.contents.has(n.id) ? "Hide its contents" : "Show its contents"}</button>`);
     bits.push(S.pinned === n.id
       ? `<button class="btn" data-act="unpin" title="Let the highlight follow what you select again">Unpin highlight</button>`
       : `<button class="btn" data-act="pin" data-id="${esc(n.id)}" title="Keep its lineage highlighted while you click other items">Pin its highlight</button>`);
@@ -2543,7 +2548,7 @@
     else if (n.kind === "schema") box.innerHTML = schemaDetails(n);
     else if (n.kind === "table" || n.kind === "file") box.innerHTML = tableDetails(n);
     else if (n.kind === "missing" || n.kind === "external") box.innerHTML = head(n, n.kind === "missing" ? "Not found" : "Outside Fabric") + `<p class="d-note">${esc(n.note || "")}</p>${n.detail ? `<div class="ev"><code>${esc(n.detail)}</code></div>` : ""}` + relationsHtml([n.id, ...childrenOf(n.id)]);
-    else if (n.type === "Lakehouse") box.innerHTML = lakehouseDetails(n);
+    else if (holdsData(n.type)) box.innerHTML = lakehouseDetails(n);
     else box.innerHTML = itemDetails(n);
   }
   const childrenOf = id => [...S.nodes.values()].filter(m => m.parent === id).map(m => m.id);
@@ -2552,21 +2557,40 @@
     const keys = order || ["in:read", "out:write", "out:maintain", "out:run", "in:run", "out:refresh", "in:refresh", "in:model_source", "out:model_source", "in:report_model", "out:report_model", "in:shortcut", "out:shortcut", "out:default_lakehouse", "in:default_lakehouse", "out:attached", "in:attached", "out:environment", "in:environment", "out:references", "in:references"];
     return keys.map(k => { const [dir, kind] = k.split(":"); const st = EDGE[kind]; return st ? refList(st[dir], rel[k]) : ""; }).join("");
   }
+  // With nothing selected: what the workspace holds, type by type, and reading it (all at once or a type at a time)
+  function readList(items) {
+    const types = [...new Set(items.map(n => n.type))].sort((a, b) => typeOrder(a) - typeOrder(b) || typeName(a, true).localeCompare(typeName(b, true)));
+    const group = t => S.groupMode === "type" ? [...S.nodes.values()].find(g => g.kind === "group" && g.key === t) : null;
+    return types.map(t => {
+      const all = items.filter(n => n.type === t), can = all.filter(n => n.scannable);
+      const read = can.filter(n => S.scans.has(n.itemId)).length, reading = can.filter(n => S.busy.has(n.itemId)).length;
+      const left = can.length - read - reading, g = group(t), name = typeName(t, all.length !== 1);
+      const failed = can.filter(n => (S.scans.get(n.itemId) || {}).status === "error").length;
+      const label = g ? `<button class="ref" data-node="${esc(g.id)}" title="Show the list of ${esc(typeName(t, true).toLowerCase())}"><span>${esc(name)}</span></button>` : `<span>${esc(name)}</span>`;
+      const state = !can.length ? '<span class="muted" title="Fabric doesn\'t let these be read">can\'t be read</span>'
+        : reading ? `<span class="muted">reading ${reading}…</span>`
+        : left ? `<button class="btn small" data-act="readall" data-type="${esc(t)}">Read ${left}</button>` : '<span class="ok-mark">all read</span>';
+      return `<tr><td>${label}</td><td class="num">${can.length ? `${read} of ${can.length} read` : all.length}${failed ? `, <span class="bad-mark" title="Select them to see why">${failed} failed</span>` : ""}</td><td>${state}</td></tr>`;
+    }).join("");
+  }
   function overview() {
     const items = [...S.nodes.values()].filter(n => n.kind === "item" && !n.external);
-    const nbs = items.filter(n => n.type === "Notebook"), lakes = items.filter(n => n.type === "Lakehouse");
-    const unreadNb = nbs.filter(n => !S.scans.has(n.itemId)).length, unreadLh = lakes.filter(n => !S.scans.has(n.itemId)).length;
+    const readable = items.filter(n => n.scannable), done = readable.filter(n => S.scans.has(n.itemId)).length;
+    const busy = readable.filter(n => S.busy.has(n.itemId)).length, unread = readable.length - done - busy;
+    const failed = readable.filter(n => (S.scans.get(n.itemId) || {}).status === "error").length;
     return `<div class="empty-hint"><h2>${esc(S.ws.name)}</h2>
       <p>The map shows what's in the workspace. Nothing inside an item is read until you select it.</p>
       <ol><li>Select a notebook: its code is read and the map draws the tables it reads (blue) and writes (orange).</li>
       <li>Select a lakehouse: its tables and shortcuts are listed.</li>
       <li>Select a table: see every notebook that writes or reads it.</li></ol>
       <p>Ctrl+click an item, or the arrow at its corner, to open it in Fabric.</p>
+      <div class="d-sec">Read <small>${done} of ${readable.length} items read${failed ? `, ${failed} failed` : ""}</small></div>
       <div class="d-actions">
-        ${unreadNb ? `<button class="btn primary" data-act="readall" data-type="Notebook">Read all ${unreadNb} notebooks</button>` : ""}
-        ${unreadLh ? `<button class="btn" data-act="readall" data-type="Lakehouse">Read all ${unreadLh} lakehouses</button>` : ""}
+        ${unread ? `<button class="btn primary" data-act="readevery" title="Read every item that hasn't been read yet">Read all (${unread})</button>`
+          : busy ? `<span class="muted">Reading ${busy}…</span>` : '<span class="ok-mark">Everything is read</span>'}
         ${S.scans.size ? `<button class="btn" data-act="unloadall" title="Forget everything that was read: every item goes back to not read">Unload everything read (${readIds(items).length})</button>` : ""}
-      </div></div>`;
+      </div>
+      <table class="tbl read-types">${readList(items)}</table></div>`;
   }
   function itemDetails(n) {
     const sc = S.scans.get(n.itemId) || {};
@@ -2593,7 +2617,7 @@
   function lakehouseDetails(n) {
     const sc = S.scans.get(n.itemId) || {};
     const d = sc.details || {};
-    let html = head(n, n.external ? `Lakehouse in ${n.workspaceName || "another workspace"}` : "Lakehouse") + statusLine(n);
+    let html = head(n, n.external ? `${typeName(n.type)} in ${n.workspaceName || "another workspace"}` : typeName(n.type)) + statusLine(n);
     const kids = childrenOf(n.id);
     const rel = relations(kids);
     const nbs = [...S.nodes.values()].filter(m => m.kind === "item" && !m.external && m.type === "Notebook");
@@ -2723,7 +2747,7 @@
       ${readIds(members).length ? `<button class="btn" data-act="unloadgroup" data-id="${esc(g.id)}" title="Forget what was read for all of them">Unload all ${readIds(members).length}</button>` : ""}
       <button class="btn" data-act="groupmap" data-id="${esc(g.id)}">${allOn ? "Take all off the map" : "Put all on the map"}</button></div>
       <p class="d-status">${members.length} items, ${members.filter(m => S.scans.has(m.itemId)).length} read.</p>
-      <ul class="refs">${members.map(m => { const lake = m.type === "Lakehouse", k = `group|${m.id}`, open = lake && S.ddOpen.has(k); return `<li><div class="ref-line">${visBox(m.id, m.label)}<span class="st ${stClass(m)}"></span><button class="ref" data-node="${esc(m.id)}"><span>${esc(m.label)}</span></button>${lake ? `<button class="dd" data-dd="${esc(k)}" data-lh="${esc(m.id)}" aria-expanded="${open}" title="${open ? "Hide" : "Show"} its tables and folders">${CHEV}</button>` : ""}${S.scans.get(m.itemId) ? `<span class="muted" style="margin-left:auto;font-size:11.5px">${esc((S.scans.get(m.itemId).summary || "").slice(0, 60))}</span>` : ""}</div>${open ? lakeDropdown(m, k) : ""}</li>`; }).join("")}</ul>`;
+      <ul class="refs">${members.map(m => { const lake = holdsData(m.type), k = `group|${m.id}`, open = lake && S.ddOpen.has(k); return `<li><div class="ref-line">${visBox(m.id, m.label)}<span class="st ${stClass(m)}"></span><button class="ref" data-node="${esc(m.id)}"><span>${esc(m.label)}</span></button>${lake ? `<button class="dd" data-dd="${esc(k)}" data-lh="${esc(m.id)}" aria-expanded="${open}" title="${open ? "Hide" : "Show"} its tables and folders">${CHEV}</button>` : ""}${S.scans.get(m.itemId) ? `<span class="muted" style="margin-left:auto;font-size:11.5px">${esc((S.scans.get(m.itemId).summary || "").slice(0, 60))}</span>` : ""}</div>${open ? lakeDropdown(m, k) : ""}</li>`; }).join("")}</ul>`;
   }
   function edgeDetails() {
     const e = V.edges.find(x => x.id === S.selEdge);
@@ -2907,9 +2931,9 @@
   const menu = $("#ctxMenu");
   function menuItems(n) {
     const many = S.multi.size > 1 && S.multi.has(n.id), items = [];
-    if (!many && n.kind === "item" && n.type === "Lakehouse") {      // how much of it is open, the current one ticked
+    if (!many && n.kind === "item" && holdsData(n.type)) {      // how much of it is open, the current one ticked
       const st = lakeState(n.id);
-      items.push({label: "Collapsed: just the lakehouse", on: st === "collapsed", run: () => collapseLake(n.id)});
+      items.push({label: `Collapsed: just the ${n.type === "Warehouse" ? "warehouse" : "lakehouse"}`, on: st === "collapsed", run: () => collapseLake(n.id)});
       if (!n.external) items.push({label: "Folders only, each collapsed", on: st === "folders", run: () => expandLake(n.id, true)});
       items.push({label: n.external ? "All its known datasets" : "Folders and all datasets", on: st === "all", run: () => expandLake(n.id)});
       items.push({sep: true});
@@ -2968,7 +2992,7 @@
     return lakeOpen(lid) ? "all" : "some";
   }
   function menuSub(n) {
-    if (n.kind === "item" && n.type === "Lakehouse") {
+    if (n.kind === "item" && holdsData(n.type)) {
       const d = lakeData(n.id), on = d.filter(x => V.vis.has(x.id)).length;
       if (!n.external && n.scannable && !S.scans.has(n.itemId)) return "Not read yet: its datasets load when you open it";
       return `${on} of ${d.length} dataset${d.length === 1 ? "" : "s"} on the map${S.folderMode.has(n.id) ? ", folders shown" : ""}${S.linkedOnly.has(n.id) ? ", linked only" : ""}`;
@@ -2990,8 +3014,8 @@
       if (!m) return;
       if (m.kind === "table") table(m);
       else if (m.kind === "schema" || m.kind === "heading") for (const t of sectionTables(m.parent, m.sec)) table(t);
-      else if ((m.kind === "item" && m.type === "Lakehouse") || m.kind === "external" || m.external) for (const t of lakeData(m.id)) table(t);
-      else if (m.kind === "group") for (const id of m.members) { const x = S.nodes.get(id); if (x && x.type === "Lakehouse") add(x); }
+      else if ((m.kind === "item" && holdsData(m.type)) || m.kind === "external" || m.external) for (const t of lakeData(m.id)) table(t);
+      else if (m.kind === "group") for (const id of m.members) { const x = S.nodes.get(id); if (x && holdsData(x.type)) add(x); }
     };
     if (many) for (const id of S.multi) add(S.nodes.get(id)); else add(n);
     return {show: [...show], hide: [...hide]};
@@ -3014,9 +3038,9 @@
     for (const id of ids) {
       const n = S.nodes.get(id);
       if (!n) continue;
-      if (n.kind === "group") { for (const m of n.members) { const it = S.nodes.get(m); if (it && it.type === "Lakehouse") resetLake(m); onMap(m, false); } S.expanded.delete(id); }
+      if (n.kind === "group") { for (const m of n.members) { const it = S.nodes.get(m); if (it && holdsData(it.type)) resetLake(m); onMap(m, false); } S.expanded.delete(id); }
       else if (n.kind === "schema") S.folderVis.set(id, false);
-      else if (n.kind === "item" && n.type === "Lakehouse" && !n.external) { resetLake(id); onMap(id, false); }
+      else if (n.kind === "item" && holdsData(n.type) && !n.external) { resetLake(id); onMap(id, false); }
       else onMap(id, false);
     }
     if (ids.some(isSel)) { S.sel = null; S.multi = new Set(); S.selEdge = null; }
@@ -3214,7 +3238,8 @@
       if (a) {
         const act = a.dataset.act;
         if (act === "rescan") enqueue(a.dataset.item, S.scans.has(a.dataset.item));
-        else if (act === "readall") readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.type === a.dataset.type && n.scannable).map(n => n.itemId));
+        else if (act === "readall") { readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.type === a.dataset.type && n.scannable).map(n => n.itemId)); renderDetails(); }
+        else if (act === "readevery") { readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.scannable).map(n => n.itemId)); renderDetails(); }
         else if (act === "readgroup") readAll((S.nodes.get(a.dataset.id) || {members: []}).members.map(id => S.nodes.get(id)).filter(n => n && n.scannable).map(n => n.itemId));
         else if (act === "groupmap") toggleGroupOnMap(a.dataset.id);
         else if (act === "contents") setContents(a.dataset.id, !S.contents.has(a.dataset.id));

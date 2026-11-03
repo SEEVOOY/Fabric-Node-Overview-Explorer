@@ -165,12 +165,29 @@ def test_unload_forgets_what_was_read(demo):
     assert any("getDefinition" in u for _, u in client.http.calls[n:])      # read fresh from Fabric
 
 
+def test_warehouse_tables_and_columns(demo):
+    client, s = demo
+    s.open_workspace(WS)
+    wh = s.scan(WS, ID["wh"])
+    tables = {n["id"].split(":", 2)[2]: n for n in wh["nodes"] if n["kind"] == "table"}
+    assert wh["status"] == "ok" and wh["details"]["schemas"] and wh["details"]["tablesVia"] == "OneLake"
+    assert set(tables) == {"dbo/rpt_tags_by_plant", "dbo/rpt_documents_status", "staging/stg_tags"}
+    assert all(n["listed"] and n["parent"] == f"item:{ID['wh']}" for n in tables.values())
+    assert tables["dbo/rpt_tags_by_plant"]["schema"] == "dbo" and tables["dbo/rpt_tags_by_plant"]["label"] == "rpt_tags_by_plant"
+    # a notebook writing through the Spark connector lands on the same table
+    nb = s.scan(WS, ID["nb30"])
+    assert any(e["kind"] == "write" and e["target"] == tables["dbo/rpt_tags_by_plant"]["id"] for e in nb["edges"])
+    cols = s.columns(WS, ID["wh"], "dbo", "rpt_tags_by_plant")
+    assert [c["name"] for c in cols["columns"]] == ["Plant", "Domain", "tags", "loaded_at"] and cols["via"] == "Delta log"
+
+
 def test_errors_and_unsupported_items(demo):
     client, s = demo
     s.open_workspace(WS)
     denied = s.scan(WS, ID["nbx"])
     assert denied["status"] == "error" and "Contributor" in denied["hint"]
-    assert s.scan(WS, ID["wh"])["status"] == "unsupported"
+    s._ws[WS].by_id["dash1"] = {"id": "dash1", "type": "Dashboard", "displayName": "Ops", "workspaceId": WS}
+    assert s.scan(WS, "dash1")["status"] == "unsupported"              # Fabric can't export a dashboard
     scratch = s.scan(WS, ID["nb99"])
     assert any(n["label"] == "(no default lakehouse)" for n in scratch["nodes"])
     checks = s.scan(WS, ID["nb60"])

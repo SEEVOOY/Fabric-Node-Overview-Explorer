@@ -103,6 +103,15 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   list too; untick it to put the map back to only the tables something uses. A lakehouse that
   hasn't been read is read when you open it. Drag the left panel's right edge to make it wider for
   long names (double-click the edge to reset).
+- **Warehouses work like lakehouses.** Selecting a warehouse reads its tables, by schema, from its
+  Tables folder in OneLake (warehouses keep their tables there as Delta tables). It then gets
+  everything a lakehouse has: its own column in the Structured view with a folder per schema, the
+  **+ / −** on its box, the right-click choices (collapsed, folders only, all datasets, linked
+  tables only, show / hide columns), the dropdown and *Folders* / *Contents* tickboxes in the left
+  panel, and the same controls in its details. Column names come from the tables' Delta logs.
+  Notebooks that read or write warehouse tables with the Spark connector (`synapsesql`), pipelines
+  that copy into a warehouse, and three-part names in SQL are linked to its tables. Listing a
+  warehouse's tables needs read access to its OneLake data (Contributor, or ReadAll).
 - **Open a lakehouse on the map.** Every lakehouse node has a **+** at its right end: click it
   to load its datasets onto the map, shown under their folders (the lakehouse is read first if it
   hasn't been). **−** collapses it again: its folders and datasets leave the map and notebook links
@@ -239,6 +248,11 @@ Keys: `/` search, `F` fit the map, `Esc` clear the selection, `+` / `-` zoom, Sp
 | Selecting a report | Power BI `GET /groups/{ws}/reports/{id}` (its semantic model) |
 | Selecting a pipeline or other item | `POST /items/{id}/getDefinition` |
 | A reference into another workspace | that item's name, once (`GET /workspaces/{ws}/items/{id}`) |
+
+With nothing selected, the details panel lists every type of item in the workspace (notebooks,
+lakehouses, warehouses, pipelines, semantic models, reports, SQL analytics endpoints, …) with how
+many of each have been read and a *Read* button per type, plus *Read all* for everything not read
+yet; items that couldn't be read are counted as failed, and clicking a type's name lists them.
 
 Results are kept in memory while the app runs: selecting an item again, or reloading the page,
 costs no calls. *Refresh* (right-click an item, or the button in its details; a group's panel has

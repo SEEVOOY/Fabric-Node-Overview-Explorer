@@ -106,7 +106,10 @@ class Resolver:
         return self.s.ext_lakehouses(it["workspaceId"]).get(it["id"])
 
     def schemas(self, it: Optional[dict]) -> Optional[bool]:
-        """True / False for a lakehouse with / without schemas; None when unknown."""
+        """True / False for a lakehouse with / without schemas; None when unknown. A warehouse always
+        has schemas (dbo by default)."""
+        if it and it.get("type") == "Warehouse":
+            return True
         props = self.lakehouse_props(it)
         if props is None:
             return None
