@@ -193,6 +193,13 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   focused on. Inside it you can click and explore freely: the map doesn't grow beyond the focus,
   ticking an item adds it and unticking takes it out. *Leave focus* (or Esc with nothing selected)
   brings everything back as it was.
+- **Opening a table in Fabric.** Fabric can open its explorer with one table previewed (*…* next
+  to the table, *Copy URL*), but doesn't publish what those links look like, so *Open in Fabric*
+  on a table opens its lakehouse until you show the app one: in a table's details, open *Open the
+  table itself in Fabric* and paste a link copied that way. The app finds the workspace, the
+  lakehouse, the schema and the table in it, and from then on builds the same kind of link for
+  every table (warehouses learn their own the same way). It's remembered in this browser;
+  *Forget that link* goes back to opening the lakehouse.
 - **Right-click an item on the map** for a menu: the thread options for tables and folders,
   *Focus on what's highlighted*, *Remove from view* (with several selected and the item among
   them, it removes them all) and *Open in Fabric*. Right-drag still pans.
@@ -220,7 +227,9 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   While you drag in the Structured view, an item snaps into line with a nearby one (centres or
   edges within a few pixels; dashed guide lines show it; hold Alt to place it freely), and nothing
   can end up on top of something else: an item dropped onto another is nudged to the nearest free
-  spot, and this is kept after every change to the map. *Snap and keep items apart* in *View* turns
+  spot, and this is kept after every change to the map. When two would end up in the same place,
+  the item you clicked, pinned or just dropped keeps the spot and the other one moves aside (then
+  the highlighted chain wins over the rest). *Snap and keep items apart* in *View* turns
   both off. The right or middle mouse button, or Space+drag, also pans. With several selected, the
   details panel lists them with *Zoom to them*, *Focus on the highlighted*, *Take off the map* and
   *Read the ones not read yet*.

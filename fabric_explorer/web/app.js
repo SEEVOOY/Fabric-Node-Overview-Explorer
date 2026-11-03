@@ -74,7 +74,7 @@
     leftTab: "structure", colCache: new Map(), colLoading: new Set(), colTarget: null,
     layout: "struct", tween: null, multi: new Set(), offsets: new Map(), space: false, focusOpen: true, ddOpen: new Set(), ddSec: new Map(), ddSecIds: new Map(), treeDD: new Set(), quietReads: new Set(), folderMode: new Set(), folderVis: new Map(), focusIds: null, focusSig: "", bigCascade: 300, threadDir: store.get("threadDir", "both"), focusMode: null, addedBy: new Map(), pendingExpand: new Map(), pinned: null, colsOnMap: new Map(), modelColsOpen: new Map(),
     modelColsVisibleOnly: store.get("modelColsVisibleOnly", false), colStale: new Set(),
-    focusAnchor: null, focusExtra: new Set(), focusOut: new Set(), flash: null, rowOrder: new Map(), secOrder: new Map(), linkedOnly: new Set(), dsScope: store.get("dsScope", "map"), dsFilter: "all",
+    focusAnchor: null, focusExtra: new Set(), focusOut: new Set(), flash: null, rowOrder: new Map(), secOrder: new Map(), linkedOnly: new Set(), lastDropped: new Set(), tableLinks: store.get("tableLinks", {}), dsScope: store.get("dsScope", "map"), dsFilter: "all",
     sel: null, selEdge: null, active: null, hover: null, hoverEdge: null, press: null,
     view: {x: 0, y: 0, k: 1}, alpha: 0, logLast: 0, logRows: [], treeFilter: "", loadedAt: "",
   };
@@ -811,7 +811,13 @@
     }
     const moved = b => b.ids.some(id => S.offsets.has(id) || (laneOf.has(id) && S.offsets.has(laneOf.get(id))));
     const byY = (a, b) => a.y0 - b.y0, list = [...blocks.values()];
-    const order = [...list.filter(b => !moved(b)).sort(byY), ...list.filter(moved).sort(byY)], placed = [];
+    // Who keeps its place when two would overlap: what you clicked (pinned, selected), then what you just
+    // dropped, then the highlighted chain, then the tidy arrangement, then items you moved earlier. The
+    // others step aside to the nearest free spot.
+    const mine = new Set([S.pinned, S.sel, ...S.multi].filter(Boolean)), lit = S.active;
+    const rank = b => b.ids.some(id => mine.has(id)) ? 0 : b.ids.some(id => S.lastDropped.has(id)) ? 1
+      : lit && b.ids.some(id => lit.has(id)) ? 2 : moved(b) ? 4 : 3;
+    const order = list.sort((a, b) => rank(a) - rank(b) || byY(a, b)), placed = [];
     const hit = (a, b) => a.x0 < b.x1 + GAP && b.x0 < a.x1 + GAP && a.y0 < b.y1 + GAP && b.y0 < a.y1 + GAP;
     const free = (b, dy) => { const r = {x0: b.x0, x1: b.x1, y0: b.y0 + dy, y1: b.y1 + dy}; return !placed.some(p => hit(r, p)); };
     for (const b of order) {
@@ -1602,7 +1608,48 @@
     }
     return best;
   }
-  function openUrl(n) { if (n && n.url) window.open(n.url, "_blank", "noopener"); }
+  function openUrl(n) { const u = linkOf(n); if (u) window.open(u, "_blank", "noopener"); }
+  // Fabric can open its explorer with one table previewed (… > Copy URL next to the table), but doesn't
+  // publish what those links look like. So the app learns the pattern from one such link: the workspace,
+  // the item, the schema and the table in it become blanks, filled in for every other table.
+  const escRe = v => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function blankOut(url, value, mark) {
+    if (!value) return {url, hit: false};
+    let hit = false;
+    for (const v of new Set([value, encodeURIComponent(value)])) {
+      const re = new RegExp(`(^|[/=?&.:#]|%2[fF]|%3[dDaA]|%2[eE])${escRe(v)}(?=$|[/&?#.%])`, "gi");
+      url = url.replace(re, (m, pre) => { hit = true; return pre + mark; });
+    }
+    return {url, hit};
+  }
+  function learnTableLink(url) {
+    url = String(url || "").trim();
+    if (!/^https:\/\//i.test(url)) return {error: "That doesn't look like a link. Paste the whole link copied from Fabric."};
+    const tables = [...S.nodes.values()].filter(t => t.kind === "table" && S.nodes.has(t.parent));
+    tables.sort((a, b) => (b.id === S.sel) - (a.id === S.sel));               // the selected table first
+    for (const t of tables) {
+      const p = S.nodes.get(t.parent);
+      if (!p.itemId || !holdsData(p.type) || !url.toLowerCase().includes(String(p.itemId).toLowerCase())) continue;
+      let r = blankOut(url, p.itemId, "{item}");
+      r = blankOut(r.url, p.workspaceId, "{workspace}");
+      const tb = blankOut(r.url, t.table || t.label, "{table}");
+      if (!tb.hit) continue;
+      const sc = t.schema ? blankOut(tb.url, t.schema, "{schema}") : tb;
+      S.tableLinks[p.type] = sc.url; store.set("tableLinks", S.tableLinks);
+      return {type: p.type, table: t};
+    }
+    return {error: "The app couldn't find one of its tables in that link. Copy the link of a table (… > Copy URL next to it), " +
+      "in a lakehouse or warehouse the app has read, and paste it as it is."};
+  }
+  // a table's own link, if the app has learned the pattern for its kind of item
+  function tableLink(t) {
+    const p = t && S.nodes.get(t.parent), tpl = p && S.tableLinks[p.type];
+    if (!tpl || !p.itemId) return "";
+    const e = v => encodeURIComponent(v || "");
+    let u = tpl.replace(/\{workspace\}/g, e(p.workspaceId)).replace(/\{item\}/g, e(p.itemId)).replace(/\{table\}/g, e(t.table || t.label));
+    return t.schema ? u.replace(/\{schema\}/g, e(t.schema)) : u.replace(/\{schema\}(\.|\/|%2[eEfF])?/g, "");
+  }
+  const linkOf = n => !n ? "" : n.kind === "table" ? (tableLink(n) || n.url || "") : (n.url || "");
 
   canvas.addEventListener("contextmenu", ev => ev.preventDefault());
   // What moves when a node is dragged: the whole selection when the node is part of it, otherwise
@@ -1758,6 +1805,7 @@
         if (S.layout === "struct") {                 // remember the move relative to the tidy arrangement (snap included)
           const g0 = pr.movers[0] || pr.followers[0], dx = g0 ? g0.m.x - g0.ox : 0, dy = g0 ? g0.m.y - g0.oy : 0;
           for (const g of pr.movers) { const o = S.offsets.get(g.m.id) || {dx: 0, dy: 0}; S.offsets.set(g.m.id, {dx: o.dx + dx, dy: o.dy + dy}); }
+          S.lastDropped = new Set(pr.movers.map(g => g.m.id));        // it takes the spot; what was there moves aside
           if (S.opts.snap) layoutStructured(true); else requestDraw();     // nudged apart if it landed on something
         } else reheat(0.1);
       }
@@ -2502,7 +2550,7 @@
   const sortKey = id => { const n = S.nodes.get(id); if (!n) return id; const p = n.parent && S.nodes.get(n.parent); return (p ? p.label + "/" : "") + n.label; };
   function actions(n) {
     const bits = [];
-    if (n.url) bits.push(`<a class="btn" href="${esc(n.url)}" target="_blank" rel="noopener">${EXT_SVG}Open in Fabric</a>`);
+    if (linkOf(n)) bits.push(`<a class="btn" href="${esc(linkOf(n))}" target="_blank" rel="noopener" title="${n.kind === "table" && !tableLink(n) ? "Opens its lakehouse or warehouse; see below to open the table itself" : "Open it in Fabric"}">${EXT_SVG}Open in Fabric</a>`);
     if (n.kind === "item" && !n.external && n.scannable) {
       const busy = S.busy.has(n.itemId);
       bits.push(S.scans.has(n.itemId)
@@ -2704,6 +2752,20 @@
       ${b("off", "Off", "Don't show columns on the map")}${b("all", "All", "Show all the columns on the map")}
       ${b("used", "In use", used ? "Only the columns a semantic model shows (columns it hides are left out)" : "No semantic model read so far shows these columns", !used)}</div></div>`;
   }
+  // Teaching the app Fabric's table links, or forgetting what it learned
+  function tableLinkCtl(n) {
+    const p = n.kind === "table" && S.nodes.get(n.parent);
+    if (!p || !holdsData(p.type)) return "";
+    const kind = typeName(p.type).toLowerCase();
+    if (S.tableLinks[p.type]) return `<p class="d-note link-note">Open in Fabric opens this table, using the ${esc(kind)} table link you gave.
+      <button class="linkish" data-act="forgetlink" data-type="${esc(p.type)}">Forget that link</button></p>`;
+    return `<details class="learn-link"${S.learnOpen ? " open" : ""}><summary>Open the table itself in Fabric</summary>
+      <p class="d-note">Open in Fabric opens the ${esc(kind)} now. Fabric can open a table directly, but doesn't publish what such links look like,
+        so show the app one: in Fabric, open the ${esc(kind)}, select <b>…</b> next to any table, choose <b>Copy URL</b>, and paste it here.</p>
+      <div class="learn-row"><input type="url" id="learnLink" placeholder="https://app.fabric.microsoft.com/…" aria-label="A table link copied from Fabric">
+        <button class="btn small" data-act="learnlink">Use it</button></div>
+      ${S.learnError ? `<p class="d-note bad">${esc(S.learnError)}</p>` : ""}</details>`;
+  }
   function threadCtl() {
     const b = (dir, label, title) => `<button data-thread="${dir}" aria-pressed="${S.threadDir === dir}" title="${title}">${label}</button>`;
     return `<div class="thread-ctl"><span>Follow</span><div class="seg" role="group" aria-label="Which way to follow it">
@@ -2714,7 +2776,7 @@
   }
   function tableDetails(n) {
     const p = S.nodes.get(n.parent);
-    let html = head(n, n.kind === "table" ? "Table" : "Folder") + (S.sel === n.id ? threadCtl() : "") + (n.kind === "table" ? colsMapCtl([n.id]) : "");
+    let html = head(n, n.kind === "table" ? "Table" : "Folder") + tableLinkCtl(n) + (S.sel === n.id ? threadCtl() : "") + (n.kind === "table" ? colsMapCtl([n.id]) : "");
     const pRead = p && p.itemId && S.scans.has(p.itemId);
     if (n.kind === "table") {
       const listed = n.listed ? "Yes" : pRead ? "No. The code names it, but the lakehouse doesn't list it (it may be created at run time, or be misspelled)." : "Unknown until the lakehouse is read.";
@@ -3256,6 +3318,13 @@
         else if (act === "refresh") refreshItems([a.dataset.item]);
         else if (act === "refreshgroup") refreshItems(readIds(((S.nodes.get(a.dataset.id) || {}).members || []).map(id => S.nodes.get(id))));
         else if (act === "reveal") revealLineage(a.dataset.id);
+        else if (act === "learnlink") {
+          const r = learnTableLink(($("#learnLink") || {}).value);
+          S.learnError = r.error || ""; S.learnOpen = !!r.error;
+          if (!r.error) toast(`Learned. Open in Fabric now opens the table itself, for every ${typeName(r.type).toLowerCase()}.`);
+          renderDetails();
+        }
+        else if (act === "forgetlink") { delete S.tableLinks[a.dataset.type]; store.set("tableLinks", S.tableLinks); renderDetails(); }
         else if (act === "pin") pinHighlight(a.dataset.id);
         else if (act === "unpin") unpinHighlight();
         else if (act === "unloadgroup") unload(readIds(((S.nodes.get(a.dataset.id) || {}).members || []).map(id => S.nodes.get(id))));
@@ -3355,7 +3424,7 @@
     else showEmpty("start");
     refreshLog();
   }
-  window.fabricExplorer = {S, get V() { return V; }, colTargets, setLinkedOnly, refreshFocus, keepApart, refreshItems, setColsOnMap, modelUse, pinHighlight, unpinHighlight, revealLineage, unload, toggleOf, expandLake, collapseLake, enterFocus, leaveFocus, setThreadDir, select, selectMany, clearSelection, reveal, setFolders, cascadeLake, setNodeOnMap, openLink, fit, setContents, setLayout, setDataOnMap, get LANES() { return LANES; }, setItemOnMap, setGroupOnMap, showAllItems, showColumns, setLeftTab,
+  window.fabricExplorer = {S, get V() { return V; }, learnTableLink, linkOf, colTargets, setLinkedOnly, refreshFocus, keepApart, refreshItems, setColsOnMap, modelUse, pinHighlight, unpinHighlight, revealLineage, unload, toggleOf, expandLake, collapseLake, enterFocus, leaveFocus, setThreadDir, select, selectMany, clearSelection, reveal, setFolders, cascadeLake, setNodeOnMap, openLink, fit, setContents, setLayout, setDataOnMap, get LANES() { return LANES; }, setItemOnMap, setGroupOnMap, showAllItems, showColumns, setLeftTab,
     readType(type) { readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.type === type && n.scannable).map(n => n.itemId)); }, screenOf(id) { const n = S.nodes.get(id); return n ? {x: n.x * S.view.k + S.view.x, y: n.y * S.view.k + S.view.y} : null; }};
   boot();
 })();
