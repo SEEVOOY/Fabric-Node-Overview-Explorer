@@ -62,6 +62,11 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
 
 ## Exploring
 
+Fabric Explorer starts on the workspace map, where the workspace is chosen. The grey dotted lines (default
+lakehouse or warehouse, attached lakehouses, environment) are drawn only while they tell something:
+not once the map shows the item reading or writing in that lakehouse, nor on an item with lines both
+in and out.
+
 - **Select an item** on the map or in the list on the left. Its content is read once and the
   map draws its links. A dashed outline means *not read yet*, a solid one *read*, and red
   *couldn't be read* (the details panel says why).
@@ -222,7 +227,8 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
   order is kept; *Re-layout* goes back to name order. Hold Shift and drag on empty space to draw a selection box (the cursor turns into
   a crosshair): everything inside is selected, and dragging any selected item moves them all
   together. Ctrl+Shift+drag adds another box to the selection, Shift+click adds or removes a single
-  item, Esc or a click on empty space clears it. In the Structured view your moves are kept when the
+  item, Esc or a click on empty space clears it. Dragging any selected item moves the whole selection;
+  a selected dataset brings its lakehouse along. In the Structured view your moves are kept when the
   map changes (new reads, tickboxes); *Re-layout* puts everything back in the tidy arrangement.
   While you drag in the Structured view, an item snaps into line with a nearby one (centres or
   edges within a few pixels; dashed guide lines show it; hold Alt to place it freely), and nothing
@@ -245,6 +251,129 @@ gold lakehouses, a dozen notebooks, a pipeline, a semantic model) without signin
 
 Keys: `/` search, `F` fit the map, `Esc` clear the selection, `+` / `-` zoom, Space+drag pan.
 
+## Column-Level Lineage and Notebook-Level Lineage (the lineage tabs)
+
+Two tabs next to *Reload* show what happens to each column. **Column-Level Lineage** is the overview:
+the columns that change from dataset to dataset, through the notebooks and pipelines between them,
+into Power BI. **Notebook-Level Lineage** is one notebook or pipeline in depth: every column of its
+datasets and each piece of its code. The column lineage It is
+worked out from the notebook's code when the notebook is read, so it costs no extra calls to Fabric;
+only the datasets' column names are read from OneLake (the same reads as the Table content tab).
+
+- **Open them** from the tabs, or by right-clicking on the map: a notebook or pipeline (*Focus on column
+  lineage*) opens Notebook-Level Lineage; a table, a semantic model or a report (*Show its column
+  changes*) opens Column-Level Lineage on it. Their details panels have the same buttons.
+- **Several at once.** Shift+click adds a dataset, a column, a definition or a card to the selection
+  (Shift+click it again takes it out), and Shift+drag on the empty sheet draws a box around more. Their
+  lines are lit together, dragging one of them moves them all, and in Column-Level Lineage *Focus on
+  their threads* keeps just theirs. The details panel lists them (click one to keep only that one);
+  Esc or *Clear the selection* lets go.
+- **Fold a dataset's columns** with the ⌄ in its heading or by right-clicking it (*Fold its columns*):
+  its lines then meet at its heading. Right-clicking the sheet folds or unfolds every dataset, and
+  *Unfold all* opens them again. What is folded is kept, per tab.
+- **Right-click in the lineage tabs** for what you can do with what is under the mouse: highlight its
+  lines (or a column's path), focus on its thread, open a notebook in Notebook-Level Lineage or a
+  dataset, model or report in Column-Level Lineage, show it on the map, open it in Fabric, or copy a
+  column's name. On the empty sheet: fit, re-layout, stop highlighting.
+- **Notebook-Level Lineage.** Pick a notebook or pipeline on the left. Both its sides are always there:
+  a dataset the map links to it that its code couldn't be followed into (a class, a function never
+  called, a library) is shown on its side, joined through a card for the notebook, and *Changed only*
+  never hides a side. A streaming `foreachBatch` function is read through. You see the datasets it reads (left) and writes (right),
+  with all their columns, and between them the notebook's definitions, in a frame with the notebook's
+  name. The name opens the notebook in Fabric; with *Full lineage*, *Focus on it* next to another
+  notebook's name switches to that notebook. Every column has its own line. It shows that notebook only: its own datasets and its own code. To
+  follow its columns on through other notebooks and into Power BI, use Column-Level Lineage
+  (right-click a dataset: *Show its column changes*).
+- **Definitions** are drawn like instrument tags on a process diagram: a balloon with letters above the
+  line and the cell and line of the code below it, next to a box with the code (on up to two lines,
+  with a stripe in the category's colour; hover or click it for all of it). The letters say what the code does:
+
+  | Letter | Column definitions | Letter | Row definitions (every column passing goes through) |
+  |---|---|---|---|
+  | S | Text: upper, trim, concat, substring, regexp_replace | F | Filter rows: filter, where, dropDuplicates, distinct, limit |
+  | N | Number: + - * /, round, abs, greatest | J | Join and union: join, union, unionByName |
+  | D | Date and time: to_date, date_format, current_timestamp | G | Group rows: groupBy, GROUP BY, pivot |
+  | C | Condition and nulls: when / otherwise, CASE, coalesce, isNull | M | Merge (upsert): MERGE INTO, DeltaTable.merge, UPDATE |
+  | T | Type change: cast, astype, to_number | P | Copy (pipeline): a Copy activity and its column mapping |
+  | A | Aggregate: sum, count, avg, max | | |
+  | W | Window: row_number, rank, lag, over | | |
+  | X | Arrays, maps and JSON: explode, struct, from_json | | |
+  | H | Hash and IDs: md5, sha2, xxhash64, uuid | | |
+  | L | Constant: lit, a fixed value | | |
+  | R | Rename: alias, withColumnRenamed, AS | | |
+  | U | Own code: a UDF or a helper the app can't see into | | |
+
+  A row definition is drawn as a bar with one lane per column passing through it, so the columns go
+  straight through and you can see which ones share it. The same code applied to several columns (a
+  loop such as `for c in cols: df = df.withColumn(c, F.trim(F.col(c)))`, or a `transform(...)` of every
+  column) is one node they all go through: by default a block with a lane for each column, so every
+  line goes straight through and can be followed (*Lanes*); *Bundled* gathers them into one point. A dashed line is a column a definition looks at without passing it on (a join key that
+  isn't kept, a filter on a dropped column). In a dataset, green marks a column the notebook changes
+  (*new*, *altered* or *renamed*); grey ones aren't used, or aren't written by this notebook.
+- **Pipelines.** A pipeline's Copy activities take part like a notebook: every column goes through the
+  copy (P), and the column mapping (the activity's translator) gives renames (R) and type changes (T).
+  Without a mapping the columns are copied by name. Pipelines are listed under the notebooks; under
+  the line in their balloons is the activity (A1 is the first Copy activity).
+- **Into Power BI.** In Column-Level Lineage, the semantic models that read the
+  datasets are drawn too: the model's columns that read the dataset columns, the measures and
+  calculated columns built on them (DAX balloons: their letters come from the DAX functions, so SUM is
+  A and IF is C), and the report visuals that show any of them, page by page. Yellow lines go into
+  Power BI. Follow a column and you see which reports a change to it reaches, before you make it.
+  Semantic models and reports are read like other items (*Read the other N* reads them too).
+- **Column-Level Lineage** shows the datasets and the notebooks between them, with only the columns that
+  change: **black lines** for the dataset relations (a notebook reads one dataset and writes
+  another), **green lines** for the changed columns, from the columns they come from, through the
+  notebook's definition, to where they are written. Each notebook lists its definitions with their
+  letters, and what it does to rows in its heading. Pick a dataset, a semantic model or a report on
+  the left to follow its thread (a model or report: everything upstream of what it reads, and all its
+  columns)
+  (*Inputs*, *Both ways*, *Outputs*; *Direct links* or *Full lineage*). *All columns* draws every
+  column's whole path, the ones copied unchanged too, so any column can be followed all the way;
+  *Changed only* (the default) keeps to the columns that change. Thin grey lines carry a changed column on through copies (silver to gold, say),
+  so its thread reaches Power BI.
+- **Focus** (in Column-Level Lineage). Select a column, a dataset or a notebook and press *Focus*: only
+  its thread is drawn, laid out on its own, with the relations along it. *Leave focus* shows everything.
+- **Wide tables.** *Changed only* (in Notebook-Level Lineage) keeps the columns the notebook changes and the
+  paths into them, and counts the rest. *Find a column* (or /) finds a column, field, visual or
+  definition in the drawing; pick it to select it and move to its row.
+- **Links and export.** The address bar follows the view, and *Copy link* copies a link that opens
+  the same view (the notebook or dataset, the scope, the selected column, focus). It opens in Fabric
+  Explorer while it runs in this browser; it can also be pasted on the page (Ctrl+V). *Export* saves
+  *this view* or *everything read* as CSV (one row per column path: target, source, the definitions
+  and where they are) or JSON; the JSON of everything read adds OpenLineage column lineage facets
+  (one job per notebook or pipeline), for a data catalog.
+- **Following a dataset, notebook or card.** Select one (click, or right-click: *Highlight its lines*)
+  and its whole lineage lights up both ways: where it goes, all the way to the last node, and where it
+  comes from, along the lines between datasets and notebooks too.
+- **Following a column.** Hover a column to light up its path through the notebooks (only its own
+  path, also through a definition it shares with other columns); click to keep it lit while you move
+  around (Esc, or a click on the empty sheet, lets go). Drag the sheet to move around and scroll to
+  zoom; drag a node (a dataset, a definition, a card) to move it, and its lines go straight to it
+  (*Re-layout* puts everything back); lines that share both ends
+  keep their spread, so a bundle stays a ribbon. Lines are drawn as directly as they can: the lanes of a shared
+  definition and the rows of a card take the order their lines come in, and a long line goes straight
+  when nothing stands in its way. *Fit* or F shows everything, and the drawing stays where you put it when you
+  click or come back to the tab. Dragging never selects the drawing's text, so the browser doesn't
+  offer to copy it. The details
+  panel shows how it is made, step by step with the code, and where it goes. *Show on the map* takes
+  you back to the map with the table or notebook selected.
+- **Functions.** The notebook's own functions, and those of the notebooks it pulls in with `%run`, are
+  read through, `transform(...)` included; a definition made inside one says so, with the first line of
+  the function's docstring and the notebook it comes from. A function that can't be read (from a
+  library) is read by the columns its call names (`domain_col="Domain"`, `columns=[...]`,
+  `out_col="SiteCode"`): those go through it, and the other columns pass it by; when it names none,
+  every column goes through it.
+- **What is followed:** pyspark (`spark.read`/`spark.table`, select, selectExpr, withColumn(s),
+  withColumnRenamed, drop, toDF, filter/where, distinct/dropDuplicates, limit, fillna/na, replace,
+  join, union(ByName), groupBy/agg/count/sum/…, transform, writes with saveAsTable, insertInto,
+  save, writeTo, synapsesql), `spark.sql(...)` and `%%sql` cells (CTEs, joins, GROUP BY, UNION,
+  INSERT, CREATE … AS, MERGE INTO, UPDATE, temporary views), Delta merges and updates, DuckDB with
+  `delta_scan` and `write_deltalake`, and pandas basics. Loops over known lists run once per item;
+  helper functions in the notebook are read through, and constants from `%run` notebooks are used.
+  Scala and R cells, names built at run time, the inside of UDFs and the columns a pivot makes can't
+  be followed; the details panel says so where it happens. When a table's columns can't be read, the
+  columns the code names are shown (in italics) and *the other columns* stands for the rest.
+
 ## What is fetched when
 
 | When | Calls |
@@ -257,6 +386,10 @@ Keys: `/` search, `F` fit the map, `Esc` clear the selection, `+` / `-` zoom, Sp
 | Selecting a report | Power BI `GET /groups/{ws}/reports/{id}` (its semantic model) |
 | Selecting a pipeline or other item | `POST /items/{id}/getDefinition` |
 | A reference into another workspace | that item's name, once (`GET /workspaces/{ws}/items/{id}`) |
+| Column-Level Lineage of a notebook | nothing new for the code (it was read with the notebook); the column names of its datasets, as for Table content |
+| Column-Level Lineage across datasets | the column names of the datasets read by notebooks and pipelines, once, as for Table content |
+| Reading a report | also its definition, for the fields its visuals show (`POST /workspaces/{ws}/items/{id}/getDefinition`) |
+| Export of everything read | nothing new beyond the column names (as above) |
 
 With nothing selected, the details panel lists every type of item in the workspace (notebooks,
 lakehouses, warehouses, pipelines, semantic models, reports, SQL analytics endpoints, …) with how
@@ -362,8 +495,20 @@ fabric_explorer/
   scanners.py              what selecting each item type reads, turned into nodes and links
   graph.py                 node ids and how names and paths are placed on lakehouses and tables
   parse/                   notebook, SQL, OneLake path, pipeline and semantic model parsers
+  column_lineage/          column-level lineage, from the notebooks' code:
+    catalog.py               what Spark functions do: 16 categories, a letter each
+    model.py                 the program a notebook is read into (frames, definitions, writes)
+    expressions.py           one pyspark or SQL expression -> the columns it reads, what it does
+    sql.py, dataframes.py    SQL statements and Python cells -> the program
+    resolve.py               the program run against the datasets' real columns -> each column's path
+    pipelines.py             a pipeline's Copy activities and their column mappings -> the program
+    powerbi.py               semantic model columns and DAX, report visuals and the fields they show
+    views.py, service.py     the two views as graphs, export (rows, OpenLineage), the page's requests
   server.py                the local page and its API (127.0.0.1 only, per-run key)
   demo.py                  the demo workspace (also used by the tests)
   web/                     the page: index.html, app.js, app.css
-tests/                     python -m pytest
+    cll/                     the Column-Level Lineage tab (ES modules): view.mjs, layout.mjs, graph.mjs,
+                             render.mjs, cll.css
+tests/                     python -m pytest (also runs tests/js with Node.js, and test_browser.py in Chromium
+                             with Playwright, when they are installed; otherwise those are skipped)
 ```

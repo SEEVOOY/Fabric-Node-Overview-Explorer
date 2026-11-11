@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Optional
 
+from .column_lineage import ColumnLineageService
 from .fabric_api import FABRIC_API, ApiError
 from .links import item_url, parse_link, workspace_url
 from .parse.onelake import is_guid
@@ -73,6 +74,8 @@ class Session:
         self._ext_lists: dict = {}
         self._ext_lakes: dict = {}
         self._columns: dict = {}
+        self._programs: dict = {}               # what each read notebook does to columns (not sent to the page)
+        self.column_lineage = ColumnLineageService(self)
 
     # ------------------------------------------------------------------ workspaces
     def workspaces(self, refresh: bool = False) -> list:
@@ -223,7 +226,9 @@ class Session:
         n = 0
         with self._lock:
             for item_id in item_ids or []:
-                if self._scans.pop((ws_id.lower(), str(item_id).lower()), None) is not None:
+                key = (ws_id.lower(), str(item_id).lower())
+                self._programs.pop(key, None)
+                if self._scans.pop(key, None) is not None:
                     n += 1
         return n
 
@@ -247,8 +252,13 @@ class Session:
                                                              "error": "The scan didn't finish."}
         try:
             result = self._run_scan(key[0], key[1], _chain + (key[1],))
+            program = result.pop("_columnProgram", None)
             with self._lock:
                 self._scans[key] = result
+                if program is not None:
+                    self._programs[key] = program
+                else:
+                    self._programs.pop(key, None)
             flight.result = result
             return result
         finally:
@@ -286,7 +296,14 @@ class Session:
                 side.append(cached)
             return (cached or {}).get("details", {}).get("exports") if cached else None
 
-        ctx = ScanContext(self, w, it, exports_of)
+        def helpers_of(nb: dict) -> dict:
+            """Functions of a notebook pulled in with %run (it is read, as for its constants)."""
+            exports_of(nb)
+            with self._lock:
+                prog = self._programs.get((ws_id, nb["id"]))
+            return dict(getattr(prog, "helpers", {}) or {})
+
+        ctx = ScanContext(self, w, it, exports_of, helpers_of)
         try:
             out = SCANNERS.get(it["type"], scan_generic)(ctx)
             result = {**base, **out, "status": "ok"}
@@ -304,6 +321,17 @@ class Session:
         if side:
             result = {**result, "alsoScanned": [s["itemId"] for s in side if s]}
         return result
+
+    def program(self, ws_id: str, item_id: str):
+        """What a read notebook does to columns (column_lineage.Program), or None."""
+        with self._lock:
+            return self._programs.get((ws_id.lower(), item_id.lower()))
+
+    def programs(self, ws_id: str) -> list:
+        """[(item, program)] for every notebook of the workspace that has been read."""
+        w = self.workspace_data(ws_id)
+        with self._lock:
+            return [(w.by_id[i], p) for (ws, i), p in self._programs.items() if ws == w.id and i in w.by_id]
 
     def columns(self, ws_id: str, lakehouse_id: str, schema: str, table: str, refresh: bool = False) -> dict:
         """A table's column names (read once, then from memory until refresh)."""

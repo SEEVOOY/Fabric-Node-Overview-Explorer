@@ -8,7 +8,11 @@
   const $ = (s, r = document) => r.querySelector(s);
   const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  const KEY = new URLSearchParams(location.hash.slice(1)).get("k") || "";
+  // The session key comes with the link the server prints. It is kept in this browser (this origin
+  // only), so a link to a view without the key opens while the same Fabric Explorer runs.
+  const HASH = new URLSearchParams(location.hash.slice(1));
+  let KEY = HASH.get("k") || "";
+  try { if (KEY) localStorage.setItem("fx.key", KEY); else KEY = localStorage.getItem("fx.key") || ""; } catch { /* private mode */ }
   const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const EXT_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9 2.5h4.5V7M13.5 2.5 7 9M11 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3"/></svg>';
   const PIN_SVG = '<svg class="pin" viewBox="0 0 16 16" aria-label="pinned highlight"><circle cx="9.5" cy="5.5" r="3.5" fill="currentColor"/><path d="M8 8 3.5 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
@@ -120,6 +124,12 @@
 
   // ============================================================ workspace and links
   async function openWorkspace(id, itemId = "", refresh = false) {
+    const out = await openWorkspaceInner(id, itemId, refresh);
+    emit("workspace", id);
+    if (pendingLink && views[pendingLink.view]) { const args = pendingLink; pendingLink = null; showView(args.view, args); }
+    return out;
+  }
+  async function openWorkspaceInner(id, itemId = "", refresh = false) {
     closePops();
     const same = S.ws && S.ws.id === id;
     const keep = same ? new Map([...S.nodes.values()].filter(n => Number.isFinite(n.x)).map(n => [n.id, {x: n.x, y: n.y, fixed: n.fixed}])) : null;
@@ -168,6 +178,7 @@
     return g.members.length <= 40;
   }
   async function openLink(text, msg) {
+    if (openViewLink(text)) { closePops(); return; }                // a Fabric Explorer link to a view
     const t = String(text || "").trim();
     if (!t) return;
     const say = (m, bad) => { if (msg) { msg.textContent = m; msg.classList.toggle("bad", !!bad); } else if (bad) toast(m); };
@@ -256,6 +267,11 @@
   // Unload: forget what was read for these items (here and in the app's memory). They go back to
   // "not read", their links leave the map, and whatever only those reads knew about goes too.
   async function unload(itemIds) {
+    const out = await unloadInner(itemIds);
+    for (const id of itemIds) emit("scan", id);
+    return out;
+  }
+  async function unloadInner(itemIds) {
     const ids = [...new Set(itemIds)].filter(id => S.scans.has(id) && !S.busy.has(id));
     if (!ids.length) { toast("Nothing to unload: none of these has been read."); return; }
     try { await api("/api/unload", {workspaceId: S.ws.id, itemIds: ids}); }
@@ -431,6 +447,22 @@
       if (n.kind === "schema") agg.set(`structure|${n.parent}|${id}`, {id: `structure|${n.parent}|${id}`, kind: "structure", source: n.parent, target: id, members: []});
       else if (isTable(n) && n.schemaNode && vis.has(n.schemaNode)) agg.set(`structure|${n.schemaNode}|${id}`, {id: `structure|${n.schemaNode}|${id}`, kind: "structure", source: n.schemaNode, target: id, members: []});
     }
+    // the dotted line to a default lakehouse (or warehouse) says nothing more once the item reads or writes there
+    const ownerOf = id => { let n = S.nodes.get(id); while (n && n.kind !== "item" && n.parent) n = S.nodes.get(n.parent); return n ? n.id : id; };
+    const tied = new Set();
+    for (const e of agg.values()) {
+      if (e.kind === "structure" || e.kind === "default_lakehouse") continue;
+      tied.add(`${e.source}\u0000${ownerOf(e.target)}`); tied.add(`${e.target}\u0000${ownerOf(e.source)}`);
+    }
+    for (const [k, e] of agg) if (e.kind === "default_lakehouse" && tied.has(`${e.source}\u0000${e.target}`)) agg.delete(k);
+    // nor any grey dotted line (default lakehouse, attached, environment) on a node with lines both in and out
+    const ins = new Set(), outs = new Set();
+    for (const e of agg.values()) {
+      if (e.kind === "structure" || !EDGE[e.kind] || EDGE[e.kind].settings) continue;
+      outs.add(e.source); ins.add(e.target);
+    }
+    const busy = id => ins.has(id) && outs.has(id);
+    for (const [k, e] of agg) if (EDGE[e.kind] && EDGE[e.kind].settings && (busy(e.source) || busy(e.target))) agg.delete(k);
     const rank = n => n.kind === "group" ? 0 : isTable(n) ? 2 : n.kind === "schema" ? 1.5 : 1;
     const nodes = [...vis].map(id => S.nodes.get(id)).sort((a, b) => rank(a) - rank(b));
     const edges = [...agg.values()];
@@ -1564,6 +1596,7 @@
         renderDetails();
         renderTreeSoon(); renderTitle(); refreshLog();
       }
+      emit("scan", job.itemId);
     }
   }
   function readAll(ids, refresh = false) {
@@ -1688,13 +1721,15 @@
   function dragSet(n) {
     const pick = id => { const m = S.nodes.get(id); return {m, ox: m.x, oy: m.y}; };
     const slot = S.layout === "struct" ? laneSlot(n) : null;
-    if (slot && slot.kind === "row") {                    // a dataset stays in its lakehouse: it moves within its folder
-      const ids = (S.multi.has(n.id) && S.multi.size > 1 ? [...S.multi] : [n.id])
-        .filter(id => { const m = S.nodes.get(id); return m && slot.lane.rows.includes(id) && rowKey(m) === slot.key; });
-      return {movers: ids.map(pick), followers: [], slot};
+    const group = S.multi.has(n.id) && S.multi.size > 1 ? [...S.multi] : [n.id];
+    const inSlot = id => { const m = S.nodes.get(id), s = m && slot ? laneSlot(m) : null; return s && s.lane === slot.lane && s.kind === slot.kind && s.key === slot.key; };
+    if (slot && slot.kind === "row" && group.every(inSlot)) {   // datasets of one folder: they move within it
+      return {movers: group.map(pick), followers: [], slot};
     }
-    if (slot && slot.kind === "section") return {movers: [pick(n.id)], followers: secRows(slot.lane, slot.key).map(pick), slot};
-    const set = new Set((S.multi.has(n.id) && S.multi.size > 1 ? [...S.multi] : [n.id]).filter(id => V.vis.has(id)));
+    if (slot && slot.kind === "section" && group.length === 1) return {movers: [pick(n.id)], followers: secRows(slot.lane, slot.key).map(pick), slot};
+    // several kinds of things (Shift+click): they move together, and a dataset brings its lakehouse along
+    const lift = id => { const m = S.nodes.get(id), s = S.layout === "struct" && m ? laneSlot(m) : null; return s ? s.lane.id : id; };
+    const set = new Set(group.map(lift).filter(id => V.vis.has(id)));
     const followers = new Set();
     if (S.layout === "struct") for (const id of [...set]) {
       const lane = LANES.find(l => l.id === id);
@@ -2558,6 +2593,9 @@
         : `<button class="btn" data-act="rescan" data-item="${esc(n.itemId)}" ${busy ? "disabled" : ""} title="Read it from Fabric">Read now</button>`);
       if (S.scans.has(n.itemId)) bits.push(`<button class="btn" data-act="unload" data-item="${esc(n.itemId)}" ${busy ? "disabled" : ""} title="Forget what was read: it goes back to not read and its links leave the map. Selecting it reads it again.">Unload</button>`);
     }
+    if (n.kind === "item" && (n.type === "Notebook" || n.type === "DataPipeline") && !n.external && n.scannable) bits.push(`<button class="btn" data-act="cll" data-item="${esc(n.itemId)}" title="See what it does to each column (Notebook-Level Lineage)">Column lineage</button>`);
+    if (n.kind === "item" && (n.type === "SemanticModel" || n.type === "Report") && !n.external) bits.push(`<button class="btn" data-act="cllds" data-id="item:${esc(n.itemId)}" title="See the columns reaching it and the changes on their way (Column-Level Lineage)">Column changes</button>`);
+    if (n.kind === "table") bits.push(`<button class="btn" data-act="cllds" data-id="${esc(n.id)}" title="See the columns that change along this table's thread">Column changes</button>`);
     if (n.kind === "table") bits.push(`<button class="btn" data-act="columns" data-id="${esc(n.id)}" title="Show its column names in the Table content tab">Show columns</button>`);
     if (n.kind === "item" && holdsData(n.type) && !n.external) bits.push(`<button class="btn" data-act="contents" data-id="${esc(n.id)}" title="Its schemas, folders and tables, on the map and in the left panel">${S.contents.has(n.id) ? "Hide its contents" : "Show its contents"}</button>`);
     bits.push(S.pinned === n.id
@@ -2960,7 +2998,7 @@
       : '<li class="muted" style="padding:8px">Nothing found. Tables appear once something that uses them has been read.</li>';
     list.hidden = false;
   }
-  function pickHit(i) { const n = searchHits[i]; if (!n) return; $("#searchList").hidden = true; $("#search").value = ""; reveal(n.id); }
+  function pickHit(i) { const n = searchHits[i]; if (!n) return; $("#searchList").hidden = true; $("#search").value = ""; if (currentView !== "map") host.reveal(n.id); else reveal(n.id); }
 
   // ---- export
   function download(name, text, type) {
@@ -3027,6 +3065,11 @@
         items.push({label, on: cur === dir, run: () => { S.threadDir = dir; store.set("threadDir", dir); revealLineage(n.id); }});
       items.push({sep: true});
     } else if (!many && n.kind !== "group") { items.push({label: "Show its lineage", run: () => revealLineage(n.id)}); items.push({sep: true}); }
+    if (!many && n.kind === "item" && (n.type === "Notebook" || n.type === "DataPipeline") && !n.external && n.scannable)
+      items.push({label: "Focus on column lineage", run: () => showView("notebooks", {mode: "notebook", notebookId: n.itemId})}, {sep: true});
+    if (!many && n.kind === "item" && (n.type === "SemanticModel" || n.type === "Report") && !n.external)
+      items.push({label: "Show its column changes", run: () => showView("columns", {mode: "datasets", focus: "item:" + n.itemId})}, {sep: true});
+    if (!many && n.kind === "table") items.push({label: "Show its column changes", run: () => showView("columns", {mode: "datasets", focus: n.id})}, {sep: true});
     if (!many && n.kind !== "group") {
       if (S.pinned === n.id) items.push({label: "Unpin its highlight", run: unpinHighlight});
       else items.push({label: "Pin its highlight (stays while you click others)", run: () => pinHighlight(n.id)});
@@ -3122,7 +3165,41 @@
     const first = menu.querySelector("button");
     if (first) first.focus();
   }
-  function closeMenu() { if (!menu.hidden) { menu.hidden = true; menu.innerHTML = ""; } }
+  function closeMenu() {
+    if (!menu.hidden) { menu.hidden = true; menu.innerHTML = ""; }
+    if (floatMenu && !floatMenu.hidden) { floatMenu.hidden = true; floatMenu.innerHTML = ""; }
+  }
+  // The other tabs' right-click menu: the same menu, floating over the page ({title, sub, items})
+  let floatMenu = null;
+  function openMenuAt(spec, x, y) {
+    if (!floatMenu) {
+      floatMenu = document.createElement("div");
+      floatMenu.id = "ctxFloat"; floatMenu.className = menu.className; floatMenu.setAttribute("role", "menu");
+      floatMenu.hidden = true;
+      document.body.appendChild(floatMenu);
+      floatMenu.addEventListener("click", ev => {
+        const b = ev.target.closest("[data-mi]");
+        if (!b) return;
+        const it = floatMenu._items[+b.dataset.mi];
+        closeMenu(); it.run();
+      });
+      floatMenu.addEventListener("keydown", ev => {
+        const list = [...floatMenu.querySelectorAll("button")], i = list.indexOf(document.activeElement);
+        if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); list[(i + (ev.key === "ArrowDown" ? 1 : -1) + list.length) % list.length].focus(); }
+        else if (ev.key === "Escape") closeMenu();
+      });
+    }
+    closeMenu();
+    floatMenu._items = spec.items;
+    floatMenu.innerHTML = `<div class="ctx-title">${esc(spec.title || "")}${spec.sub ? `<small>${esc(spec.sub)}</small>` : ""}</div>` +
+      spec.items.map((it, i) => it.sep ? '<hr class="ctx-sep">' : `<button role="menuitem" data-mi="${i}"><span class="ctx-check"></span>${esc(it.label)}</button>`).join("");
+    floatMenu.hidden = false;
+    floatMenu.style.left = `${Math.max(4, Math.min(x, innerWidth - floatMenu.offsetWidth - 6))}px`;
+    floatMenu.style.top = `${Math.max(4, Math.min(y, innerHeight - floatMenu.offsetHeight - 6))}px`;
+    hideTip();
+    const first = floatMenu.querySelector("button");
+    if (first) first.focus();
+  }
   menu.addEventListener("click", ev => {
     const b = ev.target.closest("[data-mi]");
     if (!b) return;
@@ -3134,7 +3211,9 @@
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); list[(i + (ev.key === "ArrowDown" ? 1 : -1) + list.length) % list.length].focus(); }
     else if (ev.key === "Escape") { closeMenu(); canvas.focus(); }
   });
-  document.addEventListener("pointerdown", ev => { if (!menu.hidden && !ev.target.closest("#ctxMenu")) closeMenu(); }, true);
+  document.addEventListener("pointerdown", ev => {
+    if ((!menu.hidden || (floatMenu && !floatMenu.hidden)) && !ev.target.closest("#ctxMenu, #ctxFloat")) closeMenu();
+  }, true);
   window.addEventListener("blur", closeMenu);
   function closePops(except) {
     closeMenu();
@@ -3151,6 +3230,86 @@
     return open;
   }
 
+  // ============================================================ views: the map, and others in their own module
+  // Another view (the Column-Level Lineage tab, web/cll/) registers itself and uses the app through
+  // `host` only: the API, the workspace's items, lakehouse colours, reading items, showing on the map.
+  const views = {}, listeners = {workspace: [], scan: []};
+  let currentView = "map";
+  document.body.dataset.activeView = "map";
+  function emit(name, arg) { for (const fn of listeners[name] || []) { try { fn(arg); } catch (err) { console.error(err); } } }
+  function showView(name, args) {
+    if (name !== "map" && !views[name]) return;
+    currentView = name;
+    document.body.dataset.activeView = name;
+    $("#mapLayout").hidden = name !== "map";
+    for (const [v, view] of Object.entries(views)) { if (v === name) view.show(args || {}); else view.hide(); }
+    for (const b of document.querySelectorAll(".view-tabs [data-view]")) b.setAttribute("aria-selected", String(b.dataset.view === name));
+    store.set("view", name);
+    closePops(); hideTip();
+    if (name === "map") { requestAnimationFrame(resize); history.replaceState(null, "", "#" + hashOf({}, true)); }
+  }
+  // A link's view is shown when both are ready, whichever comes last: the workspace, or this view's module
+  function registerView(name, view) {
+    views[name] = view;
+    if (pendingLink && name === pendingLink.view) {
+      if (S.ws) { const args = pendingLink; pendingLink = null; showView(name, args); }
+      return;
+    }
+  }                                                           // the map is the start page: the workspace is chosen there
+  // #v=columns&m=notebook&nb=<item>&s=full&o=1&c=<column> ... : what a link to a view says (cll/view.mjs makes them)
+  function viewArgs(p) {
+    const v = p.get("v");
+    if (v !== "columns" && v !== "notebooks") return null;
+    const view = v === "notebooks" || (p.get("m") === "notebook" && p.get("nb")) ? "notebooks" : "columns";
+    return {link: true, view, mode: view === "columns" ? "datasets" : "notebook", notebookId: p.get("nb") || "",
+      scope: p.get("s") || "", focus: p.get("f") || "", dsScope: p.get("ds") || "", direction: p.get("d") || "",
+      allColumns: p.get("a") === "1", changedOnly: p.get("o") === "1", focusMode: p.get("x") === "1", bundled: p.get("b") === "1",
+      select: p.get("c") || "", node: p.get("n") || ""};
+  }
+  let pendingLink = viewArgs(HASH);
+  function openViewLink(text) {
+    const m = /#(.*)$/.exec(String(text || "").trim());
+    if (!m || !/(^|&)(ws|v)=/.test(m[1])) return false;
+    const p = new URLSearchParams(m[1]), args = viewArgs(p), ws = (p.get("ws") || "").toLowerCase();
+    if (ws && (!S.ws || S.ws.id !== ws)) { pendingLink = args; openWorkspace(ws); }
+    else if (args) showView(args.view, args);
+    return true;
+  }
+  function hashOf(params, withKey) {
+    const h = new URLSearchParams();
+    if (withKey && KEY && HASH.get("k")) h.set("k", KEY);
+    if (S.ws) h.set("ws", S.ws.id);
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v !== "" && v !== undefined && v !== null && v !== false) h.set(k, v === true ? "1" : String(v));
+    }
+    return h.toString();
+  }
+  const host = {
+    api, store,
+    workspaceId: () => S.ws ? S.ws.id : "",
+    workspaceName: () => S.ws ? S.ws.name : "",
+    items: type => [...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.type === type).sort((a, b) => a.label.localeCompare(b.label, undefined, {numeric: true})),
+    readState: itemId => S.busy.has(itemId) ? "busy" : ((S.scans.get(itemId) || {}).status || ""),
+    busyCount: () => S.busy.size,
+    colorOf: (id, label) => lakeColor(S.nodes.get(id) || {id: id || label || "?", label: label || "", kind: "item"}),
+    read: itemId => { if (itemId && S.ws && !S.scans.has(itemId) && !S.busy.has(itemId)) { S.quietReads.add(itemId); enqueue(itemId); } },
+    readAll: types => {
+      const want = [].concat(types);
+      const ids = [...S.nodes.values()].filter(n => n.kind === "item" && !n.external && want.includes(n.type) && n.scannable && !S.scans.has(n.itemId) && !S.busy.has(n.itemId)).map(n => n.itemId);
+      for (const id of ids) { S.quietReads.add(id); enqueue(id); }
+      return ids.length;
+    },
+    refresh: itemId => refreshItems([itemId]),
+    reveal: id => { showView("map"); if (id && S.nodes.get(id)) setTimeout(() => reveal(id), 80); },
+    on: (name, fn) => { (listeners[name] = listeners[name] || []).push(fn); },
+    toggleTheme: () => $("#theme").click(),
+    toast: msg => toast(msg),
+    showView: (name, args) => showView(name, args),
+    menu: (spec, x, y) => openMenuAt(spec, x, y),
+    setHash: params => history.replaceState(null, "", "#" + hashOf(params, true)),
+    link: params => `${location.origin}${location.pathname}#${hashOf(params, false)}`,
+  };
+
   // ============================================================ wiring
   function bind() {
     $("#wsButton").onclick = () => {
@@ -3165,6 +3324,7 @@
       if (!ev.target.closest(".ws, .menu, .search")) closePops();
     });
     $("#reload").onclick = () => { if (S.ws) openWorkspace(S.ws.id, "", true); };
+    for (const b of document.querySelectorAll(".view-tabs [data-view]")) b.onclick = () => showView(b.dataset.view);
     $("#fit").onclick = () => fit();
     $("#focusBtn").onclick = () => { if (S.focusMode) leaveFocus(); else enterFocus(); };
     $("#focusLeave").onclick = () => leaveFocus();
@@ -3299,7 +3459,9 @@
       const a = ev.target.closest("[data-act]");
       if (a) {
         const act = a.dataset.act;
-        if (act === "rescan") enqueue(a.dataset.item, S.scans.has(a.dataset.item));
+        if (act === "cll") showView("notebooks", {mode: "notebook", notebookId: a.dataset.item});
+        else if (act === "cllds") showView("columns", {mode: "datasets", focus: a.dataset.id});
+        else if (act === "rescan") enqueue(a.dataset.item, S.scans.has(a.dataset.item));
         else if (act === "readall") { readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.type === a.dataset.type && n.scannable).map(n => n.itemId)); renderDetails(); }
         else if (act === "readevery") { readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.scannable).map(n => n.itemId)); renderDetails(); }
         else if (act === "readgroup") readAll((S.nodes.get(a.dataset.id) || {members: []}).members.map(id => S.nodes.get(id)).filter(n => n && n.scannable).map(n => n.itemId));
@@ -3360,6 +3522,11 @@
     if (store.get("noRight", false)) { document.body.classList.add("no-right"); $("#toggleRight").setAttribute("aria-pressed", "false"); }
     document.addEventListener("keydown", ev => {
       const typing = ev.target.closest("input, textarea, select");
+      if (currentView !== "map") {                                // another view has the keys
+        if (ev.key === "Escape") closePops();
+        if (!typing && !ev.ctrlKey && !ev.metaKey && !ev.altKey && views[currentView] && views[currentView].onKey(ev)) ev.preventDefault();
+        return;
+      }
       if (ev.key === "Escape") {
         closePops();
         if (!typing) { if (S.sel || S.multi.size || S.selEdge) clearSelection(); else if (S.focusMode) leaveFocus(); else unpinHighlight(); }
@@ -3381,6 +3548,7 @@
     document.addEventListener("paste", ev => {
       if (ev.target.closest("input, textarea")) return;
       const text = (ev.clipboardData && ev.clipboardData.getData("text")) || "";
+      if (openViewLink(text)) { ev.preventDefault(); return; }
       if (/\/groups\/|[0-9a-f]{8}-[0-9a-f]{4}-/i.test(text)) { ev.preventDefault(); openLink(text, null); }
     });
     new ResizeObserver(resize).observe($("#stage"));
@@ -3420,11 +3588,13 @@
     catch (err) { showEmpty("error", err); return; }
     S.concurrency = S.hello.concurrency || 4;
     $("#account").textContent = S.hello.account ? (S.hello.demo ? S.hello.account : `Signed in as ${S.hello.account}`) : "";
-    if (S.hello.workspaceId) openWorkspace(S.hello.workspaceId, S.hello.startItem || "");
+    const linked = (HASH.get("ws") || "").toLowerCase();       // a link to a workspace (and a view in it)
+    if (linked) openWorkspace(linked);
+    else if (S.hello.workspaceId) openWorkspace(S.hello.workspaceId, S.hello.startItem || "");
     else showEmpty("start");
     refreshLog();
   }
-  window.fabricExplorer = {S, get V() { return V; }, learnTableLink, linkOf, colTargets, setLinkedOnly, refreshFocus, keepApart, refreshItems, setColsOnMap, modelUse, pinHighlight, unpinHighlight, revealLineage, unload, toggleOf, expandLake, collapseLake, enterFocus, leaveFocus, setThreadDir, select, selectMany, clearSelection, reveal, setFolders, cascadeLake, setNodeOnMap, openLink, fit, setContents, setLayout, setDataOnMap, get LANES() { return LANES; }, setItemOnMap, setGroupOnMap, showAllItems, showColumns, setLeftTab,
+  window.fabricExplorer = {S, get V() { return V; }, host, registerView, showView, views, get view() { return currentView; }, learnTableLink, linkOf, colTargets, setLinkedOnly, refreshFocus, keepApart, refreshItems, setColsOnMap, modelUse, pinHighlight, unpinHighlight, revealLineage, unload, toggleOf, expandLake, collapseLake, enterFocus, leaveFocus, setThreadDir, select, selectMany, clearSelection, reveal, setFolders, cascadeLake, setNodeOnMap, openLink, fit, setContents, setLayout, setDataOnMap, get LANES() { return LANES; }, setItemOnMap, setGroupOnMap, showAllItems, showColumns, setLeftTab,
     readType(type) { readAll([...S.nodes.values()].filter(n => n.kind === "item" && !n.external && n.type === type && n.scannable).map(n => n.itemId)); }, screenOf(id) { const n = S.nodes.get(id); return n ? {x: n.x * S.view.k + S.view.x, y: n.y * S.view.k + S.view.y} : null; }};
   boot();
 })();

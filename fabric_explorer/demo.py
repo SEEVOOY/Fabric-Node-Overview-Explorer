@@ -73,10 +73,11 @@ COLUMNS = {
     "rpt_tags_by_plant": ["Plant", "Domain", "tags", "loaded_at"],
     "rpt_documents_status": ["Status", "Discipline", "documents", "loaded_at"],
     "stg_tags": ["TagNo", "Plant", "Domain", "Description", "loaded_at"],
-    "cms_tags_raw": _TAG + ["ingested_at"], "old_tags_backup": _TAG, "cms_tags_current": _TAG,
-    "cms_tags_history": _TAG + ["loaded_at"], "dcs_documents_raw": _DOC, "dcs_documents": _DOC + ["DisciplineName"],
-    "cms_documents_tags_raw": _LINK, "cms_documents_tags": _LINK, "bridge_documents_tags": _LINK,
-    "fact_pims_tags": _TAG, "dim_documents": _DOC, "kpi_tags_by_domain": ["Domain", "tags"],
+    "cms_tags_raw": _TAG + ["ingested_at"], "old_tags_backup": _TAG, "cms_tags_current": _TAG + ["SiteCode"],
+    "cms_tags_history": _TAG + ["SiteCode", "loaded_at"], "dcs_documents_raw": _DOC, "dcs_documents": _DOC + ["DisciplineName"],
+    "cms_documents_tags_raw": _LINK, "cms_documents_tags": _LINK + ["has_blanks", "link_key"],
+    "bridge_documents_tags": _LINK + ["has_blanks", "link_key"],
+    "fact_pims_tags": _TAG + ["SiteCode"], "dim_documents": _DOC, "kpi_tags_by_domain": ["Domain", "tags"],
     "pro_nomenclature": ["Code", "Description", "Discipline", "ValidFrom"], "discipline_codes": ["Code", "Discipline"],
     "project_master": ["Project", "ProjectName", "Plant", "Operator"], "ref_disciplines": ["Code", "Discipline"],
     "plants": ["PlantCode", "PlantName", "Country"],
@@ -115,7 +116,11 @@ def _cells(*cells):
 NOTEBOOKS = {
     "nb00": dict(lakehouse=None, params=True, cells=_cells(
         '# parameters\nbronze_lakehouse = "bronze"\nsilver_lakehouse = "silver"\ngold_lakehouse = "gold"\n'
-        'run_date = "2026-10-29"\n')),
+        'run_date = "2026-10-29"\n',
+        'from pyspark.sql import functions as F\n\n'
+        'def add_site_code(df, domain_col="Domain"):\n'
+        '    """Adds SiteCode: the first part of the domain."""\n'
+        '    return df.withColumn("SiteCode", F.split(F.col(domain_col), "-").getItem(0))\n')),
     "nb10": dict(lakehouse="bronze", known=("lh_reference",), env="env", cells=_cells(
         "#md # Ingest PIMS tags\nRaw CSV drops from PIMS land in Files/raw/pims/tags.",
         'from pyspark.sql import functions as F\n\nraw_path = "Files/raw/pims/tags/"\n'
@@ -132,9 +137,17 @@ NOTEBOOKS = {
         'notebookutils.fs.cp("Files/raw/dcs/documents", "Files/archive/dcs/documents", True)')),
     "nb20": dict(lakehouse="silver", known=("bronze",), env="env", cells=_cells(
         "%run nb_00_config",
-        'from delta.tables import DeltaTable\n\n'
+        'from delta.tables import DeltaTable\nfrom pyspark.sql import functions as F\n\n'
         'tags = spark.read.table(f"{bronze_lakehouse}.cms_tags_raw")\n'
-        'clean = tags.dropDuplicates(["TagNo"]).filter("TagNo IS NOT NULL")\n'
+        'clean = (tags.dropDuplicates(["TagNo"])\n'
+        '         .filter("TagNo IS NOT NULL")\n'
+        '         .withColumn("TagNo", F.upper(F.trim(F.col("TagNo"))))\n'
+        '         .withColumn("Description", F.coalesce(F.col("Description"), F.lit("")))\n'
+        '         .withColumn("Updated", F.to_timestamp("Updated"))\n'
+        '         .drop("ingested_at"))\n'
+        'for c in ["Plant", "Project", "System"]:\n'
+        '    clean = clean.withColumn(c, F.trim(F.col(c)))\n'
+        'clean = clean.transform(lambda d: add_site_code(d, domain_col="Domain"))\n'
         'clean.createOrReplaceTempView("tags_clean")\n\n'
         'target = DeltaTable.forName(spark, "silver.cms_tags_current")\n'
         '(target.alias("t")\n    .merge(clean.alias("s"), "t.TagNo = s.TagNo")\n'
@@ -143,10 +156,21 @@ NOTEBOOKS = {
         'SELECT *, current_timestamp() AS loaded_at FROM tags_clean\n""")')),
     "nb21": dict(lakehouse="silver", known=("bronze", "lh_reference"), cells=_cells(
         "%%sql\nCREATE OR REPLACE TABLE silver.dcs_documents AS\n"
-        "SELECT d.DocumentID, d.Title, n.Description AS DisciplineName\n"
+        "SELECT d.DocumentID, upper(trim(d.DocumentNo)) AS DocumentNo, initcap(d.Title) AS Title, d.Discipline,\n"
+        "       d.DocumentType, CAST(d.Revision AS INT) AS Revision, to_date(d.RevisionDate) AS RevisionDate,\n"
+        "       CASE WHEN d.Status IS NULL THEN 'Unknown' ELSE d.Status END AS Status, d.Plant, d.Project,\n"
+        "       n.Description AS DisciplineName\n"
         "FROM bronze.dcs_documents_raw d\n"
-        "LEFT JOIN lh_reference.ism.pro_nomenclature n ON d.Discipline = n.Code",
-        'links = spark.table("bronze.cms_documents_tags_raw")\n'
+        "LEFT JOIN lh_reference.ism.pro_nomenclature n ON d.Discipline = n.Code\n"
+        "WHERE d.DocumentID IS NOT NULL",
+        'from pyspark.sql import functions as F\nfrom utils.naming import standardise_column_names\n'
+        'from utils.quality import flag_blanks\n\n'
+        'links = (spark.table("bronze.cms_documents_tags_raw")\n'
+        '         .transform(standardise_column_names)\n'
+        '         .transform(lambda d: flag_blanks(d, check_cols=["tag_no", "document_id"], out_col="has_blanks"))\n'
+        '         .withColumn("tag_no", F.upper(F.col("tag_no")))\n'
+        '         .withColumn("link_key", F.sha2(F.concat_ws("|", "tag_no", "document_id"), 256))\n'
+        '         .dropDuplicates(["link_key"]))\n'
         'links.write.mode("overwrite").saveAsTable("silver.cms_documents_tags")')),
     "nb30": dict(lakehouse="gold", known=("silver",), cells=_cells(
         'source_tables = {\n    "cms_tags_current": "fact_pims_tags",\n    "dcs_documents": "dim_documents",\n}\n'
@@ -157,8 +181,10 @@ NOTEBOOKS = {
         'links.write.mode("overwrite").saveAsTable("gold.bridge_documents_tags")\n'
         'export = spark.table("gold.fact_pims_tags").toPandas()\n'
         'export.to_parquet("/lakehouse/default/Files/exports/fact_pims_tags.parquet")',
-        'import com.microsoft.spark.fabric\n'
-        'by_plant = spark.table("gold.fact_pims_tags").groupBy("Plant", "Domain").count().withColumnRenamed("count", "tags")\n'
+        'import com.microsoft.spark.fabric\nfrom pyspark.sql import functions as F\n\n'
+        'by_plant = (spark.table("gold.fact_pims_tags").groupBy("Plant", "Domain").count()\n'
+        '            .withColumnRenamed("count", "tags")\n'
+        '            .withColumn("loaded_at", F.current_timestamp()))\n'
         'by_plant.write.mode("overwrite").synapsesql("wh_reporting.dbo.rpt_tags_by_plant")')),
     "nb40": dict(lakehouse="silver", cells=_cells(
         'dag = {\n    "activities": [\n'
@@ -241,7 +267,13 @@ MODEL = {"name": "PIMS Model", "compatibilityLevel": 1604, "model": {
          "partitions": [{"name": "Tag history", "source": {
             "type": "entity", "entityName": "cms_tags_history", "schemaName": "dbo", "expressionSource": "DatabaseQuery"}}]},
         {"name": "Measures", "partitions": [{"name": "Measures", "mode": "import", "source": {
-            "type": "calculated", "expression": 'ROW("Total tags", BLANK())'}}]},
+            "type": "calculated", "expression": 'ROW("Total tags", BLANK())'}}], "measures": [
+            {"name": "Total tags", "expression": "COUNTROWS('Tags')"},
+            {"name": "Plants with tags", "expression": "DISTINCTCOUNT('Tags'[Plant])"},
+            {"name": "Tags per plant", "expression": "DIVIDE([Total tags], [Plants with tags])"},
+            {"name": "Changed today", "expression": "CALCULATE([Total tags], 'Tags'[Updated] >= TODAY())"},
+            {"name": "Open documents", "expression": 'CALCULATE(COUNTROWS(Documents), Documents[Status] <> "Closed")'},
+            {"name": "Last load", "expression": "MAX('Tag history'[Loaded at])"}]},
     ]}}
 
 PIPELINE = {"properties": {"activities": [
@@ -251,7 +283,12 @@ PIPELINE = {"properties": {"activities": [
         "sink": {"type": "LakehouseTableSink", "tableActionOption": "Overwrite", "datasetSettings": {
             "type": "LakehouseTable", "typeProperties": {"table": "cms_documents_tags_raw"},
             "linkedService": {"name": "bronze", "properties": {"type": "Lakehouse", "typeProperties": {
-                "artifactId": ID["bronze"], "workspaceId": WS, "rootFolder": "Tables"}}}}}}},
+                "artifactId": ID["bronze"], "workspaceId": WS, "rootFolder": "Tables"}}}}},
+        "translator": {"type": "TabularTranslator", "mappings": [
+            {"source": {"name": "TagNo", "type": "String"}, "sink": {"name": "tag_no", "type": "String"}},
+            {"source": {"name": "DocumentId", "type": "Int32"}, "sink": {"name": "document_id", "type": "Int64"}},
+            {"source": {"name": "Plant", "type": "String"}, "sink": {"name": "Plant", "type": "String"}},
+            {"source": {"name": "Project", "type": "String"}, "sink": {"name": "Project", "type": "String"}}]}}},
     {"name": "Ingest tags", "type": "TridentNotebook", "typeProperties": {"notebookId": ID["nb10"], "workspaceId": WS}},
     {"name": "Ingest documents", "type": "TridentNotebook",
      "typeProperties": {"notebookId": ID["nb11"], "workspaceId": WS}},
@@ -267,6 +304,51 @@ SJD = {"executableFile": "abfss://.../Main/compact.py", "defaultLakehouseArtifac
 MASHUP = (f'section Section1;\nshared ref_codes = let\n    Source = Lakehouse.Contents(null),\n'
           f'    Nav = Source{{[workspaceId="{WS}"]}}[Data],\n    Lake = Nav{{[lakehouseId="{ID["lh_reference"]}"]}}[Data],\n'
           f'    Codes = Lake{{[Schema="ism",Id="discipline_codes",ItemKind="Table"]}}[Data]\nin\n    Codes;\n')
+
+
+def _field(kind: str, table: str, name: str) -> dict:
+    return {kind: {"Expression": {"SourceRef": {"Entity": table}}, "Property": name}}
+
+
+def _visual(name: str, typ: str, title: str, **roles) -> dict:
+    return {"name": name, "visual": {"visualType": typ, "query": {"queryState": {
+        role: {"projections": [{"field": _field(*f)} for f in fields]} for role, fields in roles.items()}},
+        "visualContainerObjects": {"title": [{"properties": {"text": {"expr": {"Literal": {"Value": f"'{title}'"}}}}}]}}}
+
+
+def _legacy_visual(name: str, typ: str, select: list) -> dict:
+    alias = {t: t[0].lower() + str(i) for i, t in enumerate(dict.fromkeys(t for _, t, _ in select))}
+    return {"config": json.dumps({"name": name, "singleVisual": {"visualType": typ, "prototypeQuery": {
+        "From": [{"Name": a, "Entity": t, "Type": 0} for t, a in alias.items()],
+        "Select": [{kind: {"Expression": {"SourceRef": {"Source": alias[t]}}, "Property": p}, "Name": f"{t}.{p}"}
+                   for kind, t, p in select]}}})}
+
+
+# Report definitions: PIMS Tags in the PBIR format (a file per page and visual), Document status in the
+# older single report.json, so both readers are used.
+REPORTS = {
+    "rep1": {
+        "definition/report.json": {"themeCollection": {}},
+        "definition/pages/p_overview/page.json": {"name": "p_overview", "displayName": "Overview"},
+        "definition/pages/p_overview/visuals/v_total/visual.json":
+            _visual("v_total", "card", "Total tags", Values=[("Measure", "Measures", "Total tags")]),
+        "definition/pages/p_overview/visuals/v_plant/visual.json":
+            _visual("v_plant", "clusteredBarChart", "Tags by plant", Category=[("Column", "Tags", "Plant")],
+                    Y=[("Measure", "Measures", "Total tags")]),
+        "definition/pages/p_overview/visuals/v_list/visual.json":
+            _visual("v_list", "tableEx", "Tag list", Values=[("Column", "Tags", "TagNo"), ("Column", "Tags", "Tag label"),
+                                                           ("Column", "Tags", "Domain")]),
+        "definition/pages/p_quality/page.json": {"name": "p_quality", "displayName": "Quality"},
+        "definition/pages/p_quality/visuals/v_ratio/visual.json":
+            _visual("v_ratio", "card", "Tags per plant", Values=[("Measure", "Measures", "Tags per plant")]),
+        "definition/pages/p_quality/visuals/v_today/visual.json":
+            _visual("v_today", "card", "Changed today", Values=[("Measure", "Measures", "Changed today")]),
+    },
+    "rep2": {"report.json": {"sections": [{"name": "s1", "displayName": "Documents", "visualContainers": [
+        _legacy_visual("c_status", "columnChart", [("Column", "Documents", "Status"), ("Measure", "Measures", "Open documents")]),
+        _legacy_visual("c_list", "tableEx", [("Column", "Documents", "DocumentNo"), ("Column", "Documents", "Title"),
+                                             ("Column", "Documents", "Discipline")])]}]}},
+}
 
 
 def _b64(obj) -> str:
@@ -298,7 +380,8 @@ def _definition(key: str):
     if key in ("rep1", "rep2"):
         pbir = {"version": "4.0", "datasetReference": {"byConnection": {
             "connectionString": f"Data Source=powerbi://api.powerbi.com/v1.0/myorg/PIMS;semanticmodelid={ID['model']}"}}}
-        return [{"path": "definition.pbir", "payload": _b64(pbir), "payloadType": "InlineBase64"}, platform]
+        return [{"path": "definition.pbir", "payload": _b64(pbir), "payloadType": "InlineBase64"}, platform] + \
+            [{"path": p, "payload": _b64(body), "payloadType": "InlineBase64"} for p, body in REPORTS[key].items()]
     return None
 
 

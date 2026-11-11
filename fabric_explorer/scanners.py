@@ -16,12 +16,15 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from .auth import POWERBI_SCOPE, STORAGE_SCOPE
+from .column_lineage import TableRef, read_notebook_columns
+from .column_lineage.pipelines import read_pipeline_columns
+from .column_lineage.powerbi import ReportProgram, read_model, read_report
 from .fabric_api import FABRIC_API, ONELAKE_DFS, ONELAKE_TABLES, POWERBI_API, ApiError
 from .graph import LAKE_TYPES, Graph, Resolver
 from .parse.model import model_tables, parse_m
 from .parse.notebook import analyze_notebook, read_notebook
 from .parse.onelake import GUID_RE, is_guid, parse_location
-from .parse.pipeline import analyze_pipeline
+from .parse.pipeline import _ref_from_store, analyze_pipeline
 
 NOT_DEFINABLE = {"Dashboard", "Datamart", "MirroredWarehouse", "PaginatedReport"}
 _ONELAKE_IN_TEXT = re.compile(r"(?:abfss?://[^\s\"'@]+@[^\s\"'/]*onelake[^\s\"'/]*|https?://[^\s\"'/]*onelake"
@@ -29,13 +32,15 @@ _ONELAKE_IN_TEXT = re.compile(r"(?:abfss?://[^\s\"'@]+@[^\s\"'/]*onelake[^\s\"'/
 
 
 class ScanContext:
-    def __init__(self, session, ws, item: dict, exports_of: Callable[[dict], Optional[dict]]):
+    def __init__(self, session, ws, item: dict, exports_of: Callable[[dict], Optional[dict]],
+                 helpers_of: Optional[Callable[[dict], dict]] = None):
         self.s = session
         self.client = session.client
         self.ws = ws
         self.item = item
         self.r = Resolver(session, ws)
         self.exports_of = exports_of
+        self.helpers_of = helpers_of or (lambda nb: {})
 
 
 def _plural(n: int, word: str) -> str:
@@ -111,9 +116,8 @@ def scan_notebook(ctx: ScanContext) -> dict:
         f"{FABRIC_API}/workspaces/{it['workspaceId']}/notebooks/{it['id']}/getDefinition?format=ipynb")
     info = read_notebook(parts)
     refs, facts = analyze_notebook(info)
-    seeded = []
+    seeded, seed = [], {}
     if facts["runTargets"] and any(x.dynamic for x in refs):
-        seed: dict = {}
         for target in facts["runTargets"]:
             nb = r.find(_leaf(target), ("Notebook",))
             if nb and nb["id"] != it["id"]:
@@ -199,6 +203,13 @@ def scan_notebook(ctx: ScanContext) -> dict:
         elif ref.op in ("write", "maintain", "run", "refresh"):
             g.edge(ref.op, me, node, ev)
 
+    imported = {}                               # functions of the notebooks it %runs, for its column lineage
+    for target in facts["runTargets"]:
+        nb = r.find(_leaf(target), ("Notebook",))
+        if nb and nb["id"] != it["id"]:
+            for name, h in (ctx.helpers_of(nb) or {}).items():
+                imported.setdefault(name, (*h[:4], nb["displayName"]))
+    program = column_program(r, info, seed, default_lh, imported)
     nodes, edges = g.to_json()
     details = {"language": ", ".join(facts["languages"]) or info.language, "kernel": info.kernel,
                "cells": facts["cells"], "codeCells": facts["codeCells"], "format": info.format,
@@ -207,7 +218,47 @@ def scan_notebook(ctx: ScanContext) -> dict:
                "attached": attached, "environment": env_node or "", "exports": facts["exports"],
                "includedFrom": seeded, "regexCells": facts["regexCells"]}
     return {"summary": _io_summary(g, me, len(unresolved)), "nodes": nodes, "edges": edges,
-            "unresolved": unresolved, "details": details}
+            "unresolved": unresolved, "details": details, "_columnProgram": program}
+
+
+def table_ref_of(g: Graph, node: Optional[str], as_written: str = "") -> Optional[TableRef]:
+    """A table, folder or outside store placed on the map, as a dataset of the column lineage."""
+    n = g.nodes.get(node or "")
+    if not n or n.get("kind") not in ("table", "file", "external"):
+        return None
+    parent = g.nodes.get(n.get("parent", ""), {})
+    item = parent.get("kind") == "item"
+    return TableRef(id=node, label=n.get("label", ""), full_name=n.get("fullName", "") or n.get("label", ""),
+                    kind=n["kind"], lakehouse=n.get("parent", ""), lakehouse_name=parent.get("label", ""),
+                    workspace_id=parent.get("workspaceId", "") if item else "",
+                    item_id=parent.get("itemId", "") if item else "", schema=n.get("schema", ""),
+                    table=n.get("table", ""), as_written=as_written)
+
+
+def column_program(r: Resolver, info, seed: dict, default_lh: Optional[dict], imported: Optional[dict] = None):
+    """What the notebook does to columns (column_lineage), its datasets placed like the map places them."""
+    scratch = Graph()
+
+    def resolve_table(kind: str, parts: list, path: str, database: str) -> Optional[TableRef]:
+        current = default_lh
+        if database:
+            current = r.find(database.split(".")[-1], LAKE_TYPES) or current
+        if kind == "path":
+            node = r.place_location(scratch, parse_location(path), current)
+        elif kind == "warehouse_table" and len(parts) >= 2:
+            wh = r.find(parts[0], ("Warehouse", "Lakehouse", "SQLEndpoint"))
+            parent = r.item_node(scratch, wh) if wh else r.missing_node(scratch, "Warehouse", parts[0],
+                                                                         "No warehouse with this name.")
+            node = r.table_node(scratch, parent, wh if wh and wh["type"] in ("Lakehouse", "Warehouse") else None,
+                                parts[-2] if len(parts) >= 3 else None, parts[-1])
+        elif parts:
+            node = r.place_table(scratch, parts, current)
+        else:
+            return None
+        ref = table_ref_of(scratch, node, ".".join(parts) if parts else path)
+        return ref if ref is None or ref.kind in ("table", "file") else None
+
+    return read_notebook_columns(info, resolve_table, seed or None, imported)
 
 
 # ---------------------------------------------------------------------- lakehouse
@@ -352,8 +403,9 @@ def scan_semantic_model(ctx: ScanContext) -> dict:
     raw = next((v for k, v in parts.items() if k.lower().endswith("model.bim")), None)
     if raw is None:
         raise ApiError(0, "The model definition had no model.bim part.", "NoModelBim")
-    tables, sources = [], set()
-    for t in model_tables(json.loads(raw.decode("utf-8-sig"))):
+    tables, sources, placed = [], set(), {}
+    bim = json.loads(raw.decode("utf-8-sig"))
+    for t in model_tables(bim):
         src, node = t["source"], None
         ev = {"where": f"Model table {t['table']}", "verb": t["kind"] or t["mode"]}
         if src.get("item_id"):
@@ -383,6 +435,9 @@ def scan_semantic_model(ctx: ScanContext) -> dict:
                                        note=src["server"])
         if node:
             g.edge("model_source", node, me, ev)
+            ref = table_ref_of(g, node, f"{t['schema']}.{t['entity']}".strip("."))
+            if ref is not None:
+                placed[t["table"]] = ref
         tables.append({"table": t["table"], "mode": t["mode"], "kind": t["kind"], "entity": t["entity"],
                        "schema": t["schema"], "source": node or "", "columns": t.get("columns", [])})
     nodes, edges = g.to_json()
@@ -391,14 +446,15 @@ def scan_semantic_model(ctx: ScanContext) -> dict:
     where = " and ".join([", ".join(names[:-1]), names[-1]]) if len(names) > 1 else (names[0] if names else "")
     summary = f"{_plural(len(tables), 'table')}" + (f"; {used} read from {where}." if where else
                                                      "; none come from a lakehouse or warehouse.")
-    return {"summary": summary, "nodes": nodes, "edges": edges, "unresolved": [], "details": {"tables": tables}}
+    return {"summary": summary, "nodes": nodes, "edges": edges, "unresolved": [], "details": {"tables": tables},
+            "_columnProgram": read_model(bim, placed)}
 
 
 # ---------------------------------------------------------------------- report
 def scan_report(ctx: ScanContext) -> dict:
     it, r, g = ctx.item, ctx.r, Graph()
     me = r.item_node(g, it)
-    ds_id, ds_ws, via = "", it["workspaceId"], "Power BI API"
+    ds_id, ds_ws, via, parts = "", it["workspaceId"], "Power BI API", None
     try:
         rep = ctx.client.get_json(f"{POWERBI_API}/groups/{it['workspaceId']}/reports/{it['id']}", POWERBI_SCOPE)
         ds_id = str(rep.get("datasetId") or "").lower()
@@ -417,9 +473,16 @@ def scan_report(ctx: ScanContext) -> dict:
         g.edge("report_model", g.node({"id": f"missing:Item:{ds_id}", "kind": "missing", "type": "SemanticModel",
                                        "label": ds_id[:8] + "…", "note": "A semantic model this account can't see."}),
                me, {"where": f"Report settings ({via})", "verb": "Built on"})
+    try:                                         # its visuals and the fields they show, for the column lineage
+        if parts is None:
+            parts = ctx.client.get_definition(f"{FABRIC_API}/workspaces/{it['workspaceId']}/items/{it['id']}/getDefinition")
+        program = read_report(parts, ds_id)
+    except ApiError as e:
+        program = ReportProgram(ds_id, notes=[f"Its visuals couldn't be read: {e}"])
     nodes, edges = g.to_json()
     return {"summary": f"Built on {model['displayName']}." if model else "Its semantic model wasn't found.",
-            "nodes": nodes, "edges": edges, "unresolved": [], "details": {"semanticModel": f"item:{ds_id}" if ds_id else ""}}
+            "nodes": nodes, "edges": edges, "unresolved": [], "details": {"semanticModel": f"item:{ds_id}" if ds_id else ""},
+            "_columnProgram": program}
 
 
 # ---------------------------------------------------------------------- pipeline
@@ -474,9 +537,25 @@ def scan_pipeline(ctx: ScanContext) -> dict:
         ref = ctx.ws.by_id.get(gid)
         if ref and ref["id"] != it["id"] and f"item:{gid}" not in covered:
             g.edge("references", me, r.item_node(g, ref), {"where": "Pipeline definition", "verb": "ID in definition"})
+    def place(st: dict, side: str) -> Optional[TableRef]:
+        pr = _ref_from_store(st, "read" if side == "source" else "write", "", "", side)
+        scratch, node = Graph(), None
+        target = r.item(pr.item_id, pr.workspace_id or None) if pr.item_id else None
+        if target is not None:
+            parent = r.item_node(scratch, target)
+            if pr.table:
+                node = r.table_node(scratch, parent, target if target["type"] == "Lakehouse" else None,
+                                    pr.schema or None, pr.table)
+            elif pr.path:
+                node = r.file_node(scratch, parent, target, pr.path)
+        elif pr.external:
+            node = r.external_node(scratch, pr.external, label=pr.external, note="")
+        return table_ref_of(scratch, node)
+
     nodes, edges = g.to_json()
     return {"summary": _io_summary(g, me, len(unresolved)), "nodes": nodes, "edges": edges,
-            "unresolved": unresolved, "details": {"activities": activities}}
+            "unresolved": unresolved, "details": {"activities": activities},
+            "_columnProgram": read_pipeline_columns(content, place)}
 
 
 # ---------------------------------------------------------------------- everything else

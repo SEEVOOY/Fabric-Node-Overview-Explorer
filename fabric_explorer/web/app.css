@@ -568,3 +568,26 @@ svg.pin { width: 13px; height: 13px; flex: none; color: var(--c-ink); margin-lef
   background: var(--c-card); color: var(--c-ink); font: 12px var(--font-ui); }
 .link-note { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
 .linkish { padding: 0; border: 0; background: none; color: var(--c-read); text-decoration: underline; font: inherit; cursor: pointer; }
+
+/* ------------------------------------------------------------------ the views, as tabs in the top bar */
+.view-tabs { display: flex; align-self: stretch; gap: 2px; }
+.view-tabs button { height: 100%; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: none;
+  font: 600 13px var(--font-ui); color: var(--c-ink2); white-space: nowrap; }
+.view-tabs button:hover { color: var(--c-ink); }
+.view-tabs button[aria-selected="true"] { color: var(--c-ink); border-bottom-color: var(--c-ink); }
+@media (max-width: 1180px) { .view-tabs button { padding: 0 8px; } }
+
+
+/* the other tabs' right-click menu: the map's menu, floating over the page */
+
+#ctxFloat { position: fixed; z-index: 60; }
+
+/* three tabs in the top bar: the workspace's name and the account give way first, never overlap */
+.bar > .ws { flex: 0 1 auto; }
+.ws-button { min-width: 0; max-width: min(360px, 100%); }
+.ws-button > * { min-width: 0; }
+.ws-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar > .account { flex: 0 1 auto; min-width: 0; }
+.bar > .search { min-width: 150px; }
+.view-tabs { flex: 0 0 auto; }
+@media (max-width: 1500px) { .view-tabs button { padding: 0 8px; font-size: 12.5px; } .bar > .account { display: none; } }

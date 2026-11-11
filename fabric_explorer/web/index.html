@@ -6,6 +6,7 @@
 <title>Fabric Explorer</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/cll/cll.css">
 </head>
 <body>
 <header class="bar">
@@ -35,6 +36,11 @@
     </div>
   </div>
   <button id="reload" class="btn" title="Fetch the workspace's list of items again">Reload</button>
+  <nav class="view-tabs" role="tablist" aria-label="Views">
+    <button role="tab" data-view="map" aria-selected="true" title="Items, datasets and the links between them">Workspace map</button>
+    <button role="tab" data-view="columns" aria-selected="false" title="The columns that change from dataset to dataset, into Power BI">Column-Level Lineage</button>
+    <button role="tab" data-view="notebooks" aria-selected="false" title="What one notebook or pipeline does to every column">Notebook-Level Lineage</button>
+  </nav>
   <div class="search">
     <input id="search" type="search" placeholder="Find an item or table" aria-label="Find an item or table"
            autocomplete="off" spellcheck="false">
@@ -47,7 +53,7 @@
   </button>
 </header>
 
-<main class="layout">
+<main class="layout" id="mapLayout">
   <aside id="tree" class="panel tree" aria-label="Workspace">
     <div class="resizer" id="resizeLeft" title="Drag to make this panel wider; double-click to reset"></div>
     <div class="tabs" role="tablist" aria-label="Left panel">
@@ -156,6 +162,8 @@
     <div id="detailsBody" class="details-body"></div>
   </aside>
 </main>
+<main id="cllLayout" class="layout cll-layout" hidden></main>
+<main id="nllLayout" class="layout cll-layout" hidden></main>
 
 <footer class="log">
   <button id="logToggle" class="log-toggle" aria-expanded="false" title="The calls this app made to Fabric, Power BI and OneLake">
@@ -167,5 +175,6 @@
 </footer>
 
 <script src="/static/app.js"></script>
+<script type="module" src="/static/cll/main.mjs"></script>
 </body>
 </html>

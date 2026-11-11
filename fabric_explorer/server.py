@@ -12,6 +12,13 @@ Host header must be this server, so other web pages can't use it.
     POST /api/unload {workspaceId, itemIds}         forget what was read for those items
     POST /api/columns {workspaceId, lakehouseId, schema, table, refresh}   a table's column names
     GET  /api/log?since=n                  recent Fabric / Power BI / OneLake requests
+    GET  /api/column-lineage/catalog       the definition categories (letters) for the legend
+    POST /api/column-lineage/notebook {workspaceId, notebookId, scope, refresh}
+                                           what one notebook does to each column (scope direct | full)
+    POST /api/column-lineage/datasets {workspaceId, focus, scope, direction, allColumns, refresh}
+                                           the columns that change between datasets
+    POST /api/column-lineage/export {workspaceId, refresh}
+                                           every column path read, as rows and OpenLineage facets
 """
 from __future__ import annotations
 
@@ -28,8 +35,23 @@ from .fabric_api import ApiError
 from .scanners import explain
 
 WEB = Path(__file__).parent / "web"
-STATIC = {"/": "index.html", "/index.html": "index.html", "/static/app.css": "app.css",
-          "/static/app.js": "app.js", "/favicon.svg": "favicon.svg"}
+# Content types are fixed here rather than taken from the system: on Windows the registry can map .js
+# to text/plain, and browsers won't run a script served like that (or any ES module).
+CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
+                 ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
+                 ".svg": "image/svg+xml; charset=utf-8"}
+
+
+def _static_files() -> dict:
+    """The page's files: index.html, and everything under web/ by its path below /static/."""
+    files = {"/": "index.html", "/index.html": "index.html", "/favicon.svg": "favicon.svg"}
+    for path in WEB.rglob("*"):
+        if path.is_file() and path.suffix in CONTENT_TYPES and "tests" not in path.parts:
+            files["/static/" + path.relative_to(WEB).as_posix()] = path.relative_to(WEB).as_posix()
+    return files
+
+
+STATIC = _static_files()
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
@@ -122,9 +144,7 @@ class Handler(BaseHTTPRequestHandler):
             if not path.is_file():
                 self._json(404, {"error": "not found"})
                 return
-            ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
-            if ctype.startswith("text/") or ctype in ("application/javascript", "image/svg+xml"):
-                ctype += "; charset=utf-8"
+            ctype = CONTENT_TYPES.get(path.suffix) or mimetypes.guess_type(name)[0] or "application/octet-stream"
             self._send(200, path.read_bytes(), ctype, {"Content-Security-Policy": CSP} if name.endswith(".html")
                        else None)
         elif url.path == "/api/hello":
@@ -140,6 +160,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Missing workspace id.")
                 return s.open_workspace(ws, refresh=q.get("refresh") == "1")
             self._api(load)
+        elif url.path == "/api/column-lineage/catalog":
+            self._api(s.column_lineage.catalog)
         elif url.path == "/api/log":
             def log():
                 entries, last = s.client.log.since(int(q.get("since") or 0))
@@ -168,6 +190,25 @@ class Handler(BaseHTTPRequestHandler):
             self._api(lambda: s.columns(str(body.get("workspaceId") or ""), str(body.get("lakehouseId") or ""),
                                         str(body.get("schema") or ""), str(body.get("table") or ""),
                                         refresh=bool(body.get("refresh"))))
+        elif url.path == "/api/column-lineage/notebook":
+            body = self._body()
+            s = self.server.session
+            self._api(lambda: s.column_lineage.notebook(
+                str(body.get("workspaceId") or ""), str(body.get("notebookId") or ""),
+                scope="full" if body.get("scope") == "full" else "direct", refresh=bool(body.get("refresh"))))
+        elif url.path == "/api/column-lineage/export":
+            body = self._body()
+            s = self.server.session
+            self._api(lambda: s.column_lineage.export(str(body.get("workspaceId") or ""),
+                                                      refresh=bool(body.get("refresh"))))
+        elif url.path == "/api/column-lineage/datasets":
+            body = self._body()
+            s = self.server.session
+            self._api(lambda: s.column_lineage.datasets(
+                str(body.get("workspaceId") or ""), focus=str(body.get("focus") or ""),
+                scope="direct" if body.get("scope") == "direct" else "full",
+                direction=body.get("direction") if body.get("direction") in ("in", "out") else "both",
+                all_columns=bool(body.get("allColumns")), refresh=bool(body.get("refresh"))))
         else:
             self._json(404, {"error": "not found"})
 
